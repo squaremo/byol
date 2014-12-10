@@ -1,6 +1,12 @@
-.PHONY: all
+SRCS=lispy.c mpc/mpc.c
+TARGET=lispy
 
-all: lispy
+.PHONY: all clean
 
-lispy: lispy.c
-	gcc -Wall -ledit -o $@ $^
+all: $(TARGET)
+
+clean:
+	rm -f *.o $(TARGET)
+
+lispy: $(SRCS)
+	gcc -std=c99 -Wall -ledit -lm -o $(TARGET) $^
