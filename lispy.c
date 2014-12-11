@@ -6,12 +6,14 @@
 
 #include "mpc/mpc.h"
 
-enum { LVAL_NUM, LVAL_SYM, LVAL_SEXP, LVAL_ERR };
+enum { LVAL_NUM, LVAL_SYM, LVAL_SEXP, LVAL_FUNC, LVAL_ERR };
 
 enum { LERR_DIV_ZERO, LERR_BAD_OP, LERR_BAD_ARG };
 
 typedef struct sexp sexp;
 typedef struct lval lval;
+
+typedef lval* (*func)(int argc, lval**);
 
 struct sexp {
   lval** elems;
@@ -24,6 +26,7 @@ struct lval {
     long number;
     char* symbol;
     sexp sexp;
+    func func;
     int err; } value;
 };
 
@@ -54,6 +57,13 @@ lval* lval_sexp(int count, lval** elems) {
   result->tag = LVAL_SEXP;
   result->value.sexp.count = count;
   result->value.sexp.elems = elems;
+  return result;
+}
+
+lval* lval_func(func f) {
+  lval* result = malloc(sizeof(lval));
+  result->tag = LVAL_FUNC;
+  result->value.func = f;
   return result;
 }
 
@@ -110,6 +120,18 @@ lval* read_lval(mpc_ast_t* s) {
   return NULL;
 }
 
+char* err_msg(int err) {
+  switch (err) {
+  case LERR_DIV_ZERO:
+    return "Divide by zero difficulty";
+  case LERR_BAD_OP:
+    return "Unknown operation";
+  case LERR_BAD_ARG:
+    return "Bad argument";
+  }
+  return "I have never seen this before in my life";
+}
+
 int print_lval(lval* v) {
   switch (v->tag) {
   case LVAL_NUM:
@@ -119,8 +141,10 @@ int print_lval(lval* v) {
     printf("%s", v->value.symbol);
     break;
   case LVAL_ERR:
-    printf("<error %d>", v->value.err);
+    printf("<error %s>", err_msg(v->value.err));
     break;
+  case LVAL_FUNC:
+    printf("<function>");
   case LVAL_SEXP:
     putchar('(');
     for (int i = 0; i < v->value.sexp.count; i++) {
@@ -140,6 +164,73 @@ int print_and_free_root(mpc_ast_t* root) {
       print_lval(inval);
       lval_free(inval);
       putchar(' ');
+    }
+  }
+  return 0;
+}
+
+lval* eval_sexp(lval*);
+
+lval* prim_plus(int argc, lval** argv) {
+  long result = 0;
+  for (int i = 0; i < argc; i++) {
+    lval* arg = argv[i];
+    if (arg->tag != LVAL_NUM) {
+      return lval_err(LERR_BAD_ARG);
+    }
+    result += arg->value.number;
+  }
+  return lval_num(result);
+}
+
+lval* lookup_sym(char* name) {
+  if (strcmp(name, "+") == 0) {
+    return lval_func(&prim_plus);
+  }
+  return lval_err(LERR_BAD_OP);
+}
+
+lval* eval(lval* e) {
+  switch (e->tag) {
+  case LVAL_NUM:
+    return e;
+  case LVAL_SYM:
+    return lookup_sym(e->value.symbol);
+  case LVAL_SEXP:
+    return eval_sexp(e);
+  }
+  return NULL;
+}
+
+lval* eval_application(lval* head, int argc, lval** argv) {
+  if (head->tag != LVAL_FUNC) {
+    print_lval(head);
+    return lval_err(LERR_BAD_ARG);
+  }
+  else {
+    func f = head->value.func;
+    return f(argc, argv);
+  }
+}
+
+lval* eval_sexp(lval* s) {
+  if (s->value.sexp.count == 0) {
+    return s;
+  }
+  else {
+    lval* head = eval(s->value.sexp.elems[0]);
+    lval** args = s->value.sexp.elems + 1;
+    return eval_application(head, s->value.sexp.count - 1, args);
+  }
+}
+
+int eval_and_free_root(mpc_ast_t* root) {
+  for (int i = 0; i < root->children_num; i++) {
+    lval* inval = read_lval(root->children[i]);
+    if (inval) {
+      lval* res = eval(inval);
+      print_lval(res);
+      putchar('\n');
     }
   }
   return 0;
@@ -171,7 +262,7 @@ int main(int argc, char** argv) {
     if (mpc_parse("<stdin>", in, Program, &r)) {
       add_history(in);
       mpc_ast_t* root = r.output;
-      print_and_free_root(root);
+      eval_and_free_root(root);
       putchar('\n');
       //mpc_ast_print(r.output);
       mpc_ast_delete(r.output);
