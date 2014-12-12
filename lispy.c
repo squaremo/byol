@@ -6,25 +6,19 @@
 
 #include "mpc/mpc.h"
 
-enum lval_tag { LVAL_NUM, LVAL_SYM, LVAL_SEXP,
+enum lval_tag { LVAL_NUM, LVAL_SYM, LVAL_CONS, LVAL_NIL, LVAL_VEC,
                 LVAL_FUNC, LVAL_PRIM, LVAL_ERR };
 
 enum lval_errno { LERR_DIV_ZERO, LERR_BAD_OP, LERR_BAD_ARG,
                   LERR_BAD_ARITY, LERR_UNDEF, LERR_POOR_FORM };
 
-typedef struct sexp sexp;
 typedef struct lval lval;
 typedef struct lenv lenv;
 typedef struct lclos lclos;
 typedef lval* (*lprim)(int argc, lval**);
 
-struct sexp {
-  lval** elems;
-  int count;
-};
-
 struct lclos {
-  sexp* body;
+  lval* body;
   lenv* env;
   char** formals;
   int count;
@@ -35,11 +29,21 @@ struct lval {
   union {
     long number;
     char* symbol;
-    sexp sexp;
+    struct {
+      int count;
+      lval** elems;
+    } vec;
+    struct {
+      lval* car;
+      lval* cdr;
+    } cons;
     lclos* func;
     lprim prim;
-    int err; } value;
+    int err;
+  } value;
 };
+
+lval NIL = {LVAL_NIL};
 
 struct lenv {
   lenv* parent;
@@ -77,7 +81,8 @@ lval* lval_num(long value) {
 }
 
 lval* lval_sym(char* characters) {
-  lval* result = malloc(sizeof(lval));
+  int len = strlen(characters);
+  lval* result = malloc(sizeof(lval) + len);
   result->tag = LVAL_SYM;
   result->value.symbol = malloc(strlen(characters) + 1);
   strcpy(result->value.symbol, characters);
@@ -91,11 +96,21 @@ lval* lval_err(int errtype) {
   return result;
 }
 
-lval* lval_sexp(int count, lval** elems) {
+lval* lval_vec(int count, lval** elems) {
+  lval* result = malloc(sizeof(lval) + sizeof(lval*) * count);
+  lval** reselems = (lval**)(result + 1);
+  result->tag = LVAL_VEC;
+  result->value.vec.count = count;
+  result->value.vec.elems = reselems;
+  memmove(reselems, elems, sizeof(lval*) * count);
+  return result;
+}
+
+lval* lval_cons(lval* car, lval* cdr) {
   lval* result = malloc(sizeof(lval));
-  result->tag = LVAL_SEXP;
-  result->value.sexp.count = count;
-  result->value.sexp.elems = elems;
+  result->tag = LVAL_CONS;
+  result->value.cons.car = car;
+  result->value.cons.cdr = cdr;
   return result;
 }
 
@@ -106,7 +121,7 @@ lval* lval_prim(lprim f) {
   return result;
 }
 
-lval* lval_clos(int count, char** formals, lenv* env, sexp* body) {
+lval* lval_clos(int count, char** formals, lenv* env, lval* body) {
   lclos* closure = malloc(sizeof(lclos));
   closure->count = count;
   closure->formals = formals;
@@ -118,28 +133,52 @@ lval* lval_clos(int count, char** formals, lenv* env, sexp* body) {
   return result;
 }
 
-int lval_free(lval* val) {
-  switch (val->tag) {
-  case LVAL_NUM:
-  case LVAL_ERR:
-  case LVAL_PRIM:
-    break;
-  case LVAL_FUNC:
-    free(val->value.func);
-    break;
-  case LVAL_SYM:
-    free(val->value.symbol);
-    break;
-  case LVAL_SEXP:
-    for (int i = 0; i < val->value.sexp.count; i++) {
-      lval_free(val->value.sexp.elems[i]);
-    }
-    free(val->value.sexp.elems);
-    break;
+
+static inline lval* car(lval* s) {
+  if (s->tag != LVAL_CONS) {
+    return lval_err(LERR_BAD_ARG);
   }
-  free(val);
-  return 0;
+  return s->value.cons.car;
 }
+
+static inline lval* cdr(lval* s) {
+  if (s->tag != LVAL_CONS) {
+    return lval_err(LERR_BAD_ARG);
+  }
+  else {
+    return s->value.cons.cdr;
+  }
+}
+
+static inline lval* cddr(lval* s) {
+  lval* cdrval = cdr(s);
+  if (cdrval->tag != LVAL_CONS) {
+    return lval_err(LERR_BAD_ARG);
+  }
+  else {
+    return cdrval->value.cons.cdr;
+  }
+}
+
+static inline lval* cadr(lval* s) {
+  lval* cdrval = cdr(s);
+  if (cdrval->tag != LVAL_CONS) {
+    return lval_err(LERR_BAD_ARG);
+  }
+  else {
+    return cdrval->value.cons.car;
+  }
+}
+
+static inline int len(lval* s) {
+  int l = 0;
+  while (s->tag == LVAL_CONS) {
+    l++;
+    s = s->value.cons.cdr;
+  }
+  return l;
+}
+
 
 lval* read_number(mpc_ast_t* n) {
   errno = 0;
@@ -155,13 +194,15 @@ lval* read_lval(mpc_ast_t* s) {
   else if (strstr(s->tag, "symbol")) {
     return lval_sym(s->contents);
   }
-  else if (strstr(s->tag, "sexp")) {
+  else if (strstr(s->tag, "vector")) {
+    // gross
     int count = 0;
     for (int i = 0; i < s->children_num; i++) {
       mpc_ast_t* s1 = s->children[i];
       if (strstr(s1->tag, "number") ||
           strstr(s1->tag, "symbol") ||
-          strstr(s1->tag, "sexp"))
+          strstr(s1->tag, "sexp")   ||
+          strstr(s1->tag, "vector"))
         count++;
     }
     lval** children = malloc(sizeof(lval) * count);
@@ -172,7 +213,19 @@ lval* read_lval(mpc_ast_t* s) {
         children[childi++] = child;
       }
     }
-    return lval_sexp(count, children);
+    lval* res = lval_vec(count, children);
+    free(children);
+    return res;
+  }
+  else if (strstr(s->tag, "sexp")) {
+    lval* list = &NIL;
+    for (int i = s->children_num - 1; i >= 0; i--) {
+      lval* child = read_lval(s->children[i]);
+      if (child) {
+        list = lval_cons(child, list);
+      }
+    }
+    return list;
   }
   return NULL;
 }
@@ -210,13 +263,29 @@ int print_lval(lval* v) {
   case LVAL_PRIM:
     printf("<function>");
     break;
-  case LVAL_SEXP:
-    putchar('(');
-    for (int i = 0; i < v->value.sexp.count; i++) {
+  case LVAL_VEC:
+    putchar('[');
+    for (int i = 0; i < v->value.vec.count; i++) {
       if (i > 0) putchar(' ');
-      print_lval(v->value.sexp.elems[i]);
+      print_lval(v->value.vec.elems[i]);
+    }
+    putchar(']');
+    break;
+  case LVAL_NIL:
+    printf("()");
+  case LVAL_CONS:
+    putchar('(');
+    while (v->tag == LVAL_CONS) {
+      print_lval(v);
+      putchar(' ');
+      v = v->value.cons.cdr;
+    }
+    if (v->tag != LVAL_NIL) {
+      puts(". ");
+      print_lval(v);
     }
     putchar(')');
+    break;
   }
   return 0;
 }
@@ -231,7 +300,8 @@ void print_env(lenv* env) {
   }
 }
 
-lval* eval_sexp(lenv*, lval*);
+lval* eval_cons(lenv*, lval*);
+lval* eval_vec(lenv*, lval*);
 
 lval* eval(lenv* env, lval* e) {
   switch (e->tag) {
@@ -243,38 +313,58 @@ lval* eval(lenv* env, lval* e) {
       if (v == NULL) return lval_err(LERR_UNDEF);
       else return v;
     }
-  case LVAL_SEXP:
-    return eval_sexp(env, e);
+  case LVAL_VEC:
+    return eval_vec(env, e);
+  case LVAL_NIL:
+    return &NIL;
+  case LVAL_CONS:
+    return eval_cons(env, e);
   default:
-    return NULL;
+    return lval_err(LERR_BAD_ARG);
   }
 }
 
-lval* eval_progn(lenv* env, sexp* exprs) {
+lval* eval_vec(lenv* env, lval* vec) {
+  lval** vals = malloc(vec->value.vec.count * sizeof(lval*));
+  for (int i = 0; i < vec->value.vec.count; i++) {
+    vals[i] = eval(env, vec->value.vec.elems[i]);
+  }
+  lval* result = lval_vec(vec->value.vec.count, vals);
+  free(vals);
+  return result;
+}
+
+// assumes a list of expressions, anything else is bad syntax
+lval* eval_progn(lenv* env, lval* exprs) {
   lval* val = NULL;
-  for (int i = 0; i < exprs->count; i++) {
-    val = eval(env, exprs->elems[i]);
+  while (exprs->tag == LVAL_CONS) {
+    val = eval(env, exprs->value.cons.car);
+    exprs = exprs->value.cons.cdr;
   }
   return val;
 }
 
-lval* eval_application(lenv* env, lval* head, int count, lval** exprs) {
+// Calling convention: stick 'em in an array. This means we have to
+// count them first, but oh well. When there's a stack, they can go
+// there.
+lval* eval_application(lenv* env, lval* head, lval* exprs) {
+  int count = len(exprs);
+  lval** argv = malloc(sizeof(lval*) * count);
+  int i = 0;
+  while (exprs->tag == LVAL_CONS) {
+    argv[i++] = eval(env, exprs->value.cons.car);
+    exprs = cdr(exprs);
+  }
+
   if (head->tag == LVAL_PRIM) {
     lprim f = head->value.prim;
-    lval** argv = malloc(sizeof(lval*) * count);
-    for (int i = 0; i < count; i++) {
-      argv[i] = eval(env, exprs[i]);
-    }
+    // arity??
     return f(count, argv);
   }
   else if (head->tag == LVAL_FUNC) {
     lclos* c = head->value.func;
     if (c->count != count) {
       return lval_err(LERR_BAD_ARITY);
-    }
-    lval** argv = malloc(sizeof(lval*) * count);
-    for (int i = 0; i < count; i++) {
-      argv[i] = eval(env, exprs[i]);
     }
     lenv* newenv = lenv_extend(c->env, c->count, c->formals, argv);
     //    print_env(newenv);
@@ -285,79 +375,35 @@ lval* eval_application(lenv* env, lval* head, int count, lval** exprs) {
   }
 }
 
-static inline lval* car(lval* s) {
-  if (s->value.sexp.count < 1) {
-    return lval_err(LERR_BAD_ARG);
-  }
-  return s->value.sexp.elems[0];
-}
+lval* eval_cons(lenv* env, lval* s) {
+  lval* head = car(s);
+  // special forms
+  if (head->tag == LVAL_SYM) {
+    if (strcmp(head->value.symbol, "lambda") == 0) {
+      lval* args = cadr(s);
+      if (args->tag != LVAL_VEC) {
+        puts("args not a vector "); print_lval(args);
+        return lval_err(LERR_POOR_FORM);
+      }
+      lval* body = cddr(s);
+      char** formals = malloc(sizeof(char*) * args->value.vec.count);
 
-static inline lval* cdr(lval* s) {
-  if (s->value.sexp.count < 1) {
-    return lval_err(LERR_BAD_ARG);
-  }
-  else {
-    return lval_sexp(s->value.sexp.count - 1,
-                     s->value.sexp.elems + 1);
-  }
-}
-
-static inline lval* cddr(lval* s) {
-  if (s->value.sexp.count < 2) {
-    return lval_err(LERR_BAD_ARG);
-  }
-  else {
-    return lval_sexp(s->value.sexp.count - 2,
-                     s->value.sexp.elems + 2);
-  }
-}
-
-static inline lval* cadr(lval* s) {
-  if (s->value.sexp.count < 2) {
-    return lval_err(LERR_BAD_ARG);
-  }
-  else {
-    return s->value.sexp.elems[1];
-  }
-}
-
-lval* eval_sexp(lenv* env, lval* s) {
-  if (s->value.sexp.count == 0) {
-    return s;
-  }
-  else {
-    lval* head = car(s);
-    // special forms
-    if (head->tag == LVAL_SYM) {
-      if (strcmp(head->value.symbol, "lambda") == 0) {
-        if (s->value.sexp.count < 3) {
+      for (int i = 0; i < args->value.vec.count; i++) {
+        lval* arg = args->value.vec.elems[i];
+        if (arg->tag != LVAL_SYM) {
+          puts("formal not a symbol "); print_lval(arg);
           return lval_err(LERR_POOR_FORM);
         }
-        lval* args = cadr(s);
-        if (args->tag != LVAL_SEXP) {
-          return lval_err(LERR_BAD_ARG);
-        }
-        lval* body = cddr(s);
-        int count = args->value.sexp.count;
-        char** formals = malloc(sizeof(char*) * count);
-        for (int i = 0; i < count; i++) {
-          lval* arg = args->value.sexp.elems[i];
-          if (arg->tag != LVAL_SYM) {
-            return lval_err(LERR_BAD_ARG);
-          }
-          formals[i] = arg->value.symbol;
-        }
-        lval* closure = lval_clos(count, formals, env, &(body->value.sexp));
-        return closure;
+        formals[i] = arg->value.symbol;
       }
+      lval* closure = lval_clos(args->value.vec.count, formals, env, body);
+      return closure;
     }
-    // ok treat it like a function
-    head = eval(env, head);
-    lval** args = s->value.sexp.elems + 1;
-    return eval_application(env, head, s->value.sexp.count - 1, args);
   }
+  // ok treat it like a function
+  head = eval(env, head);
+  return eval_application(env, head, cdr(s));
 }
-
 
 lval* prim_plus(int argc, lval** argv) {
   long result = 0;
@@ -381,7 +427,7 @@ lenv* init_toplevel() {
   return lenv_extend(NULL, 1, names, prims) ;
 }
 
-int eval_and_free_root(lenv* toplevel, mpc_ast_t* root) {
+int eval_root(lenv* toplevel, mpc_ast_t* root) {
   int multi = 0;
   for (int i = 0; i < root->children_num; i++) {
     lval* inval = read_lval(root->children[i]);
@@ -396,14 +442,13 @@ int eval_and_free_root(lenv* toplevel, mpc_ast_t* root) {
 }
 
 // We can get either an expression, or program
-int print_and_free_root(mpc_ast_t* root) {
+int print_root(mpc_ast_t* root) {
   int multi = 0;
   for (int i = 0; i < root->children_num; i++) {
     lval* inval = read_lval(root->children[i]);
     if (inval) {
       if (multi) putchar(' ');
       print_lval(inval);
-      lval_free(inval);
       multi = 1;
     }
   }
@@ -423,15 +468,17 @@ int main(int argc, char** argv) {
   mpc_parser_t* Symbol = mpc_new("symbol");
   mpc_parser_t* Expr = mpc_new("expr");
   mpc_parser_t* Sexp = mpc_new("sexp");
+  mpc_parser_t* Vector = mpc_new("vector");
   mpc_parser_t* Program = mpc_new("program");
   
   mpca_lang(MPCA_LANG_DEFAULT, "                        \
     number   : /-?[0-9]+/ ;                             \
     symbol   : /[-a-zA-Z_0-9?!+*\\/]+/ ;                \
-    expr     : <number> | <symbol> | <sexp> ;           \
+    expr     : <number> | <symbol> | <sexp> | <vector> ;\
     sexp     : '(' <expr>* ')' ;                        \
+    vector   : '[' <expr>* ']' ;                        \
     program  : /^/ <expr>* /$/ ;                        \
-  ", Number, Symbol, Expr, Sexp, Program);
+  ", Number, Symbol, Expr, Sexp, Vector, Program);
 
   lenv* toplevel = init_toplevel();
 
@@ -441,8 +488,8 @@ int main(int argc, char** argv) {
     if (mpc_parse("<stdin>", in, Program, &r)) {
       add_history(in);
       mpc_ast_t* root = r.output;
-      //print_and_free_root(root);
-      eval_and_free_root(toplevel, root);
+      //print_root(root);
+      eval_root(toplevel, root);
       putchar('\n');
       //mpc_ast_print(r.output);
       mpc_ast_delete(r.output);
@@ -455,7 +502,7 @@ int main(int argc, char** argv) {
     free(in);
   }
 
-  mpc_cleanup(5, Number, Symbol, Expr, Sexp, Program);
+  mpc_cleanup(6, Number, Symbol, Expr, Sexp, Vector, Program);
 
   return 0;
 }
