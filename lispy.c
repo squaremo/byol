@@ -436,7 +436,7 @@ obj prim_list(int argc, vector* argv) {
   }
   else {
     obj res = (obj)make_nil();
-    for (int i = 0; i < vec_count(argv); i++) {
+    for (int i = vec_count(argv) - 1; i >= 0; i--) {
       res = (obj)make_cons(vec_get(argv, i), res);
     }
     return res;
@@ -491,9 +491,6 @@ int main(int argc, char** argv) {
   // don't buffer stdout
   setbuf(stdout, NULL);
 
-  puts("Lispy version 0.0.2");
-  puts("Press Ctrl+C to exit");
-
   mpc_parser_t* Number = mpc_new("number");
   mpc_parser_t* Symbol = mpc_new("symbol");
   mpc_parser_t* Expr = mpc_new("expr");
@@ -511,6 +508,28 @@ int main(int argc, char** argv) {
   ", Number, Symbol, Expr, Sexp, Vector, Program);
 
   vector* toplevel = init_toplevel();
+
+  if (argc > 1) {
+    mpc_result_t r;
+    for (int i = 1; i < argc; i++) {
+      if (mpc_parse("<commandline>", argv[i], Program, &r)) {
+        mpc_ast_t* root = r.output;
+        eval_root(toplevel, root);
+        putchar('\n');
+        //mpc_ast_print(r.output);
+        mpc_ast_delete(r.output);
+      }
+      else {
+        mpc_err_print(r.error);
+        mpc_err_delete(r.error);
+      }
+    }
+    return 0;
+  }
+  // else
+
+  puts("Lispy version 0.0.3");
+  puts("Press Ctrl+C to exit");
 
   while (1) {
     char* in = readline(prompt);
