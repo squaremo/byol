@@ -12,214 +12,211 @@
 enum lval_tag { LVAL_NUM, LVAL_SYM, LVAL_CONS, LVAL_NIL, LVAL_VEC,
                 LVAL_FUNC, LVAL_PRIM, LVAL_ERR };
 
-enum lval_errno { LERR_DIV_ZERO, LERR_BAD_OP, LERR_BAD_ARG,
-                  LERR_BAD_ARITY, LERR_UNDEF, LERR_POOR_FORM };
-
-typedef struct lval lval;
-typedef struct lclos lclos;
-typedef lval* (*lprim)(int argc, lval**);
+typedef intptr_t obj;
 
 typedef struct {
   uint64_t tag:8;
   uint64_t size:56;
-} lval_header;
+} header;
 
-struct lval {
-  lval_header hdr;
-  union {
-    long number;
-    char* symbol;
-    struct {
-      int count;
-      lval** elems;
-    } vec;
-    struct {
-      lval* car;
-      lval* cdr;
-    } cons;
-    struct {
-      lval* env;
-      lval* formals;
-      lval* body;
-    } func;
-    lprim prim;
-    int err;
-  } value;
-};
+typedef long number;
+typedef char symbol;
+typedef char err;
+typedef struct {
+  int count;
+} vector;
+typedef obj (*prim_fun)(int, vector*);
+typedef prim_fun prim;
+typedef struct {
+  obj car;
+  obj cdr;
+} cons;
+typedef struct {
+  vector* env;
+  vector* formals;
+  cons* body;
+} closure;
+typedef void nil;
 
-lval NIL = {{LVAL_NIL}};
+static inline enum lval_tag obj_tag(obj val) {
+  return ((header*)val - 1)->tag;
+}
+#define tag(v) (obj_tag((obj)(v)))
 
-static inline enum lval_tag tag(lval* val) {
-  return val->hdr.tag;
+/* static inline int obj_size(obj val) {
+  return ((header*)val - 1)->size;
+  }*/
+
+static inline int sym_cmp(symbol* a, symbol* b) {
+  return strcmp(a, b);
 }
 
-static inline int lsym_cmp(lval* a, lval* b) {
-  return strcmp(a->value.symbol, b->value.symbol);
+static inline int vec_count(vector* vec) {
+  return vec->count;
 }
 
-static inline int lvec_count(lval* vec) {
-  return vec->value.vec.count;
+static inline void vec_set(vector* vec, int i, obj val) {
+  ((obj*)(vec + 1))[i] = val;
 }
 
-static inline void lvec_set(lval* vec, int i, lval* val) {
-  vec->value.vec.elems[i] = val;
+static inline obj vec_get(vector* vec, int i) {
+  return ((obj*)(vec + 1))[i];
 }
 
-static inline lval* lvec_get(lval* vec, int i) {
-  return vec->value.vec.elems[i];
+// === constructing values
+
+static inline int round_to_word(int n) {
+  return (n + (sizeof(intptr_t) - 1)) & ~(sizeof(intptr_t) - 1);
 }
 
-lval* lval_num(long value) {
-  lval* result = malloc(sizeof(lval));
-  result->hdr.tag = LVAL_NUM;
-  result->hdr.size = sizeof(lval);
-  result->value.number = value;
+static inline void* alloc_obj(enum lval_tag tag, int size) {
+  // sizeof(header) will be padded anyway, so the sum will be rounded
+  //printf("Allocating type %d of size %d, rounded to %d\n", tag, size, round_to_word(size));
+  header* h = malloc(sizeof(header) + round_to_word(size));
+  h->tag = tag;
+  // NB size does not include header
+  h->size = round_to_word(size) / sizeof(intptr_t);
+  return h + 1;
+}
+
+number* make_num(long value) {
+  number* result = (number*)alloc_obj(LVAL_NUM, sizeof(number));
+  *result = value;
   return result;
 }
 
-lval* lval_sym(char* characters) {
-  int len = strlen(characters);
-  int size = sizeof(lval) + len + 1;
-  lval* result = malloc(size);
-  result->hdr.tag = LVAL_SYM;
-  result->hdr.size = size;
-  result->value.symbol = (char*)(result + 1);
-  strcpy(result->value.symbol, characters);
+symbol* make_sym(char* characters) {
+  int size = strlen(characters) + 1;
+  symbol* result = (symbol*)alloc_obj(LVAL_SYM, size);
+  strcpy(result, characters);
   return result;
 }
 
-lval* lval_err(int errtype) {
-  lval* result = malloc(sizeof(lval));
-  result->hdr.tag = LVAL_ERR;
-  result->hdr.size = sizeof(lval);
-  result->value.err = errtype;
+err* make_err(char* msg) {
+  err* result = (err*)alloc_obj(LVAL_ERR, strlen(msg) + 1);
+  strcpy(result, msg);
   return result;
 }
 
-lval* lval_vec(int count) {
-  int size = sizeof(lval) + sizeof(lval*) * count;
-  lval* result = malloc(size);
-  result->hdr.tag = LVAL_VEC;
-  result->hdr.size = size;
-  result->value.vec.count = count;
-  result->value.vec.elems = (lval**)(result + 1);
+vector* make_vec(int count) {
+  int size = sizeof(vector) + sizeof(obj) * count;
+  vector* result = (vector*)alloc_obj(LVAL_VEC, size);
+  result->count = count;
   return result;
 }
 
-lval* lval_cons(lval* car, lval* cdr) {
-  lval* result = malloc(sizeof(lval));
-  result->hdr.tag = LVAL_CONS;
-  result->hdr.size = sizeof(lval);
-  result->value.cons.car = car;
-  result->value.cons.cdr = cdr;
+cons* make_cons(obj car, obj cdr) {
+  cons* result = (cons*)alloc_obj(LVAL_CONS, sizeof(cons));
+  result->car = car;
+  result->cdr = cdr;
   return result;
 }
 
-lval* lval_prim(lprim f) {
-  lval* result = malloc(sizeof(lval));
-  result->hdr.tag = LVAL_PRIM;
-  result->hdr.size = sizeof(lval);
-  result->value.prim = f;
+nil* make_nil() {
+  return alloc_obj(LVAL_NIL, 0);
+}
+
+prim* make_prim(prim_fun f) {
+  prim* result = (prim*)alloc_obj(LVAL_PRIM, sizeof(prim));
+  *result = f;
   return result;
 }
 
-lval* lval_clos(lval* formals, lval* env, lval* body) {
-  lval* result = malloc(sizeof(lval));
-  result->hdr.tag = LVAL_FUNC;
-  result->hdr.size = sizeof(lval);
-  result->value.func.formals = formals;
-  result->value.func.body = body;
-  result->value.func.env = env;
+closure* make_clos(vector* formals, vector* env, cons* body) {
+  closure* result = (closure*)alloc_obj(LVAL_FUNC, sizeof(closure));
+  result->formals = formals;
+  result->env = env;
+  result->body = body;
   return result;
 }
 
-static inline lval* car(lval* s) {
+static inline obj car(cons* s) {
   if (tag(s) != LVAL_CONS) {
-    return lval_err(LERR_BAD_ARG);
+    return (obj)make_err("Tried to get car of non-list");
   }
-  return s->value.cons.car;
+  return s->car;
 }
 
-static inline lval* cdr(lval* s) {
+static inline obj cdr(cons* s) {
   if (tag(s) != LVAL_CONS) {
-    return lval_err(LERR_BAD_ARG);
+    return (obj)make_err("Tried to get cdr of non-list");
   }
   else {
-    return s->value.cons.cdr;
+    return s->cdr;
   }
 }
 
-static inline lval* cddr(lval* s) {
-  lval* cdrval = cdr(s);
+static inline obj cddr(cons* s) {
+  cons* cdrval = (cons*)cdr(s);
   if (tag(cdrval) != LVAL_CONS) {
-    return lval_err(LERR_BAD_ARG);
+    return (obj)make_err("Tried to get cddr of not long enough list");
   }
   else {
-    return cdrval->value.cons.cdr;
+    return cdrval->cdr;
   }
 }
 
-static inline lval* cadr(lval* s) {
-  lval* cdrval = cdr(s);
+static inline obj cadr(cons* s) {
+  cons* cdrval = (cons*)cdr(s);
   if (tag(cdrval) != LVAL_CONS) {
-    return lval_err(LERR_BAD_ARG);
+    return (obj)make_err("Tried to get cadr of not long enough list");
   }
   else {
-    return cdrval->value.cons.car;
+    return cdrval->car;
   }
 }
 
-static inline int len(lval* s) {
+static inline int cons_len(cons* s) {
   int l = 0;
   while (tag(s) == LVAL_CONS) {
     l++;
-    s = s->value.cons.cdr;
+    s = (cons*)s->cdr;
   }
   return l;
 }
 
 // === environments
 
-lval* lenv_extend(lval* parent, lval* names, lval** vals) {
-  int count = lvec_count(names);
-  lval* e = lval_vec(count + 2);
-  lvec_set(e, 0, parent);
-  lvec_set(e, 1, names);
+vector* env_extend(vector* parent, vector* names, vector* vals) {
+  int count = vec_count(names);
+  vector* e = make_vec(count + 2);
+  vec_set(e, 0, (obj)parent);
+  vec_set(e, 1, (obj)names);
   for (int i = 0; i < count; i++) {
-    lvec_set(e, i + 2, vals[i]);
+    vec_set(e, i + 2, vec_get(vals, i));
   }
   return e;
 }
 
-lval* lenv_lookup(lval* env, lval* name) {
+obj env_lookup(vector* env, symbol* name) {
   while (env != NULL) {
-    lval* names = lvec_get(env, 1);
-    int count = lvec_count(names);
+    vector* names = (vector*)vec_get(env, 1);
+    int count = vec_count(names);
     for (int i = 0; i < count; i++) {
-      if (lsym_cmp(lvec_get(names, i), name) == 0) {
-        return lvec_get(env, i + 2);
+      if (sym_cmp((symbol*)vec_get(names, i), name) == 0) {
+        return vec_get(env, i + 2);
       }
     }
-    env = lvec_get(env, 0);
+    env = (vector*)vec_get(env, 0);
   }
-  return NULL;
+  return (obj)NULL;
 }
 
 // ======= reading and printing
 
-lval* read_number(mpc_ast_t* n) {
+number* read_number(mpc_ast_t* n) {
   errno = 0;
   long x = strtol(n->contents, NULL, 10);
   // ignore for now
-  return lval_num(x);
+  return make_num(x);
 }
 
-lval* read_lval(mpc_ast_t* s) {
+obj read_obj(mpc_ast_t* s) {
   if (strstr(s->tag, "number")) {
-    return read_number(s);
+    return (obj)read_number(s);
   }
   else if (strstr(s->tag, "symbol")) {
-    return lval_sym(s->contents);
+    return (obj)make_sym(s->contents);
   }
   else if (strstr(s->tag, "vector")) {
     // gross
@@ -233,56 +230,38 @@ lval* read_lval(mpc_ast_t* s) {
         count++;
     }
     int childi = 0;
-    lval* res = lval_vec(count);
+    vector* res = make_vec(count);
     for (int i = 0; i < s->children_num; i++) {
-      lval* child = read_lval(s->children[i]);
+      obj child = read_obj(s->children[i]);
       if (child) {
-        lvec_set(res, childi++, child);
+        vec_set(res, childi++, child);
       }
     }
-    return res;
+    return (obj)res;
   }
   else if (strstr(s->tag, "sexp")) {
-    lval* list = &NIL;
+    cons* list = (cons*)make_nil();
     for (int i = s->children_num - 1; i >= 0; i--) {
-      lval* child = read_lval(s->children[i]);
+      obj child = read_obj(s->children[i]);
       if (child) {
-        list = lval_cons(child, list);
+        list = make_cons(child, (obj)list);
       }
     }
-    return list;
+    return (obj)list;
   }
-  return NULL;
+  return (obj)NULL;
 }
 
-char* err_msg(int err) {
-  switch (err) {
-  case LERR_DIV_ZERO:
-    return "Divide by zero difficulty";
-  case LERR_BAD_OP:
-    return "Unknown operation";
-  case LERR_BAD_ARG:
-    return "Bad argument";
-  case LERR_BAD_ARITY:
-    return "Arity mismatch";
-  case LERR_UNDEF:
-    return "Undefined variable";
-  case LERR_POOR_FORM:
-    return "Poor form";
-  }
-  return "I have never seen this before in my life";
-}
-
-int print_lval(lval* v) {
+void print_obj(obj v) {
   switch (tag(v)) {
   case LVAL_NUM:
-    printf("%li", v->value.number);
+    printf("%li", *(number*)v);
     break;
   case LVAL_SYM:
-    printf("%s", v->value.symbol);
+    printf("%s", (char*)v);
     break;
   case LVAL_ERR:
-    printf("<error %s>", err_msg(v->value.err));
+    printf("<error %s>", (char*)v);
     break;
   case LVAL_FUNC:
   case LVAL_PRIM:
@@ -290,197 +269,220 @@ int print_lval(lval* v) {
     break;
   case LVAL_VEC:
     putchar('[');
-    for (int i = 0; i < lvec_count(v); i++) {
+    for (int i = 0; i < vec_count((vector*)v); i++) {
       if (i > 0) putchar(' ');
-      print_lval(lvec_get(v, i));
+      print_obj(vec_get((vector*)v, i));
     }
     putchar(']');
     break;
   case LVAL_NIL:
     printf("()");
-  case LVAL_CONS:
-    putchar('(');
-    while (tag(v) == LVAL_CONS) {
-      print_lval(v);
-      putchar(' ');
-      v = v->value.cons.cdr;
-    }
-    if (tag(v) != LVAL_NIL) {
-      puts(". ");
-      print_lval(v);
-    }
-    putchar(')');
     break;
+  case LVAL_CONS:
+    {
+      putchar('(');
+      int space = 0;
+      while (tag(v) == LVAL_CONS) {
+        if (space) putchar(' ');
+        space = 1;
+        print_obj(car((cons*)v));
+        v = cdr((cons*)v);
+      }
+      if (tag(v) != LVAL_NIL) {
+        puts(".");
+        print_obj(v);
+      }
+      putchar(')');
+      break;
+    }
   }
-  return 0;
 }
 
-void print_env(lval* env) {
+void print_env(vector* env) {
   while (env != NULL) {
-    lval* names = lvec_get(env, 1);
-    puts("env");
-    for (int i = 0; i < lvec_count(names); i++) {
-      print_lval(lvec_get(names, i)); puts(" = ");
-      print_lval(lvec_get(env, i + 2));
+    vector* names = (vector*)vec_get(env, 1);
+    puts("--env--");
+    for (int i = 0; i < vec_count(names); i++) {
+      print_obj(vec_get(names, i)); puts(" = ");
+      print_obj(vec_get(env, i + 2));
       putchar('\n');
     }
-    env = lvec_get(env, 0);
+    env = (vector*)vec_get(env, 0);
   }
 }
 
-lval* eval_cons(lval*, lval*);
-lval* eval_vec(lval*, lval*);
+obj eval_cons(vector*, cons*);
+obj eval_vec(vector*, vector*);
 
-lval* eval(lval* env, lval* e) {
+obj eval(vector* env, obj e) {
   switch (tag(e)) {
   case LVAL_NUM:
     return e;
   case LVAL_SYM:
     {
-      lval* v = lenv_lookup(env, e);
-      if (v == NULL) return lval_err(LERR_UNDEF);
+      obj v = env_lookup(env, (symbol*)e);
+      if (v == (obj)NULL) return (obj)make_err("Undefined variable");
       else return v;
     }
   case LVAL_VEC:
-    return eval_vec(env, e);
+    return eval_vec(env, (vector*)e);
   case LVAL_NIL:
-    return &NIL;
+    return e;
   case LVAL_CONS:
-    return eval_cons(env, e);
+    return eval_cons(env, (cons*)e);
   default:
-    return lval_err(LERR_BAD_ARG);
+    return (obj)make_err("I can't eval this");
   }
 }
 
-lval* eval_vec(lval* env, lval* vec) {
-  lval* res = lval_vec(lvec_count(vec));
-  for (int i = 0; i < lvec_count(vec); i++) {
-    lvec_set(res, i, eval(env, lvec_get(vec, i)));
+obj eval_vec(vector* env, vector* vec) {
+  vector* res = make_vec(vec_count(vec));
+  for (int i = 0; i < vec_count(vec); i++) {
+    vec_set(res, i, eval(env, vec_get(vec, i)));
   }
-  return res;
+  return (obj)res;
 }
 
 // assumes a list of expressions, anything else is bad syntax
-lval* eval_progn(lval* env, lval* exprs) {
-  lval* val = NULL;
+obj eval_progn(vector* env, cons* exprs) {
+  obj val = (obj)NULL;
   while (tag(exprs) == LVAL_CONS) {
     val = eval(env, car(exprs));
-    exprs = cdr(exprs);
+    exprs = (cons*)cdr(exprs);
   }
   return val;
 }
 
-// Calling convention: stick 'em in an array. This means we have to
+// Calling convention: stick 'em in a vector. This means we have to
 // count them first, but oh well. When there's a stack, they can go
 // there.
-lval* eval_application(lval* env, lval* head, lval* exprs) {
-  lval* res;
-  int count = len(exprs);
-  lval** argv = malloc(sizeof(lval*) * count);
+obj eval_application(vector* env, obj head, cons* exprs) {
+  obj res;
+  int count = cons_len(exprs);
+  vector* argv = make_vec(count);
   int i = 0;
   while (tag(exprs) == LVAL_CONS) {
-    argv[i++] = eval(env, car(exprs));
-    exprs = cdr(exprs);
+    vec_set(argv, i++, eval(env, car(exprs)));
+    exprs = (cons*)cdr(exprs);
   }
 
   if (tag(head) == LVAL_PRIM) {
-    lprim f = head->value.prim;
+    prim_fun f = *(prim*)head;
     // arity??
     res = f(count, argv);
   }
   else if (tag(head) == LVAL_FUNC) {
-    if (lvec_count(head->value.func.formals) != count) {
-      res = lval_err(LERR_BAD_ARITY);
+    closure* f = (closure*)head;
+    if (vec_count(f->formals) != count) {
+      res = (obj)make_err("Wrong arity");
     }
     else {
-      lval* newenv = lenv_extend(head->value.func.env,
-                                 head->value.func.formals, argv);
-      res = eval_progn(newenv, head->value.func.body);
+      vector* newenv = env_extend(f->env, f->formals, argv);
+      res = eval_progn(newenv, f->body);
     }
   }
   else {
-    res = lval_err(LERR_BAD_ARG);
+    res = (obj)make_err("Not a function in the head of the expression");
   }
-  free(argv);
   return res;
 }
 
-lval* eval_cons(lval* env, lval* s) {
-  lval* head = car(s);
+obj eval_cons(vector* env, cons* s) {
+  obj head = car(s);
   // special forms
   if (tag(head) == LVAL_SYM) {
-    if (lsym_cmp(head, lval_sym("lambda")) == 0) {
-      lval* args = cadr(s);
+    if (sym_cmp((symbol*)head, (symbol*)"lambda") == 0) {
+      vector* args = (vector*)cadr(s);
       if (tag(args) != LVAL_VEC) {
         //puts("args not a vector "); print_lval(args);
-        return lval_err(LERR_POOR_FORM);
+        return (obj)make_err("Args in lambda must be a vector");
       }
-      lval* body = cddr(s);
+      cons* body = (cons*)cddr(s);
+      if (tag(body) != LVAL_CONS) {
+        return (obj)make_err("Need expressions for body of lambda");
+      }
 
       // check we have all symbols
-      for (int i = 0; i < lvec_count(args); i++) {
-        if (tag(lvec_get(args, i)) != LVAL_SYM) {
+      for (int i = 0; i < vec_count(args); i++) {
+        if (tag(vec_get(args, i)) != LVAL_SYM) {
           //puts("formal not a symbol "); print_lval(lvec_get(args, i));
-          return lval_err(LERR_POOR_FORM);
+          return (obj)make_err("Formals of lambda must be symbols");
         }
       }
-      lval* closure = lval_clos(args, env, body);
-      return closure;
+      closure* c = make_clos(args, env, body);
+      return (obj)c;
     }
   }
   // ok treat it like a function
   head = eval(env, head);
-  return eval_application(env, head, cdr(s));
+  return eval_application(env, head, (cons*)cdr(s));
 }
 
-lval* prim_plus(int argc, lval** argv) {
+obj prim_plus(int argc, vector* argv) {
   long result = 0;
   for (int i = 0; i < argc; i++) {
-    lval* arg = argv[i];
+    obj arg = vec_get(argv, i);
     if (tag(arg) != LVAL_NUM) {
-      return lval_err(LERR_BAD_ARG);
+      return (obj)make_err("Arguments to + must be numbers");
     }
-    result += arg->value.number;
+    result += *(number*)arg;
   }
-  return lval_num(result);
+  return (obj)make_num(result);
 }
 
-lval* init_toplevel() {
-  int c = 1;
-
-  lval* names = lval_vec(c);
-  lval** prims = malloc(c * sizeof(lval*));
-
-  lvec_set(names, 0, lval_sym("+")); prims[0] = lval_prim(&prim_plus);
-  return lenv_extend(NULL, names, prims) ;
+obj prim_list(int argc, vector* argv) {
+  if (argc == 0) {
+    return (obj)make_nil();
+  }
+  else {
+    obj res = (obj)make_nil();
+    for (int i = 0; i < vec_count(argv); i++) {
+      res = (obj)make_cons(vec_get(argv, i), res);
+    }
+    return res;
+  }
 }
 
-int eval_root(lval* toplevel, mpc_ast_t* root) {
+vector* init_toplevel() {
+  int c = 2;
+
+  vector* names = make_vec(c);
+  vector* prims = make_vec(c);
+
+  vec_set(names, 0, (obj)make_sym("+"));
+  vec_set(prims, 0, (obj)make_prim(&prim_plus));
+
+  vec_set(names, 1, (obj)make_sym("list"));
+  vec_set(prims, 1, (obj)make_prim(&prim_list));
+  
+  return env_extend(NULL, names, prims) ;
+}
+
+void eval_root(vector* toplevel, mpc_ast_t* root) {
   int multi = 0;
   for (int i = 0; i < root->children_num; i++) {
-    lval* inval = read_lval(root->children[i]);
+    obj inval = read_obj(root->children[i]);
     if (inval) {
       if (multi) putchar('\n');
-      lval* res = eval(toplevel, inval);
-      print_lval(res);
+      //printf(";; "); print_obj(inval); puts(" ->");
+      obj res = eval(toplevel, inval);
+      print_obj(res);
       multi = 1;
     }
   }
-  return 0;
 }
 
 // We can get either an expression, or program
-int print_root(mpc_ast_t* root) {
+void print_root(mpc_ast_t* root) {
   int multi = 0;
   for (int i = 0; i < root->children_num; i++) {
-    lval* inval = read_lval(root->children[i]);
+    obj inval = read_obj(root->children[i]);
     if (inval) {
       if (multi) putchar(' ');
-      print_lval(inval);
+      print_obj(inval);
       multi = 1;
     }
   }
-  return 0;
 }
 
 int main(int argc, char** argv) {
@@ -508,7 +510,7 @@ int main(int argc, char** argv) {
     program  : /^/ <expr>* /$/ ;                        \
   ", Number, Symbol, Expr, Sexp, Vector, Program);
 
-  lval* toplevel = init_toplevel();
+  vector* toplevel = init_toplevel();
 
   while (1) {
     char* in = readline(prompt);
@@ -516,7 +518,6 @@ int main(int argc, char** argv) {
     if (mpc_parse("<stdin>", in, Program, &r)) {
       add_history(in);
       mpc_ast_t* root = r.output;
-      //print_root(root);
       eval_root(toplevel, root);
       putchar('\n');
       //mpc_ast_print(r.output);
