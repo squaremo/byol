@@ -12,7 +12,7 @@
 
 enum lval_tag { LVAL_FWD, LVAL_NUM, LVAL_SYM, LVAL_CONS,
                 LVAL_NIL, LVAL_VEC, LVAL_FUNC, LVAL_PRIM,
-                LVAL_ERR };
+                LVAL_STR, LVAL_ERR };
 
 typedef intptr_t obj;
 
@@ -23,6 +23,7 @@ typedef struct {
 
 typedef long number;
 typedef char symbol;
+typedef char string;
 typedef char err;
 typedef struct {
   int count;
@@ -211,6 +212,13 @@ symbol* make_sym(char* characters) {
   return result;
 }
 
+string* make_str(char* characters) {
+  int size = strlen(characters) + 1;
+  string* result = (string*)alloc_obj(LVAL_STR, size);
+  strcpy(result, characters);
+  return result;
+}
+
 err* make_err(char* msg) {
   err* result = (err*)alloc_obj(LVAL_ERR, strlen(msg) + 1);
   strcpy(result, msg);
@@ -345,6 +353,9 @@ obj read_obj(mpc_ast_t* s) {
   else if (strstr(s->tag, "symbol")) {
     return (obj)make_sym(s->contents);
   }
+  else if (strstr(s->tag, "string")) {
+    return (obj)make_str(s->contents);
+  }
   else if (strstr(s->tag, "vector")) {
     // gross
     int count = 0;
@@ -352,6 +363,7 @@ obj read_obj(mpc_ast_t* s) {
       mpc_ast_t* s1 = s->children[i];
       if (strstr(s1->tag, "number") ||
           strstr(s1->tag, "symbol") ||
+          strstr(s1->tag, "string") ||
           strstr(s1->tag, "sexp")   ||
           strstr(s1->tag, "vector"))
         count++;
@@ -391,6 +403,9 @@ void print_obj(obj v) {
     printf("%li", *(number*)v);
     break;
   case LVAL_SYM:
+    printf("%s", (char*)v);
+    break;
+  case LVAL_STR:
     printf("%s", (char*)v);
     break;
   case LVAL_ERR:
@@ -452,6 +467,7 @@ obj eval_vec(vector*, vector*);
 obj eval(vector* env, obj e) {
   switch (tag(e)) {
   case LVAL_NUM:
+  case LVAL_STR:
     return e;
   case LVAL_SYM:
     {
@@ -651,19 +667,21 @@ int main(int argc, char** argv) {
 
   mpc_parser_t* Number = mpc_new("number");
   mpc_parser_t* Symbol = mpc_new("symbol");
+  mpc_parser_t* String = mpc_new("string");
   mpc_parser_t* Expr = mpc_new("expr");
   mpc_parser_t* Sexp = mpc_new("sexp");
   mpc_parser_t* Vector = mpc_new("vector");
   mpc_parser_t* Program = mpc_new("program");
   
-  mpca_lang(MPCA_LANG_DEFAULT, "                        \
-    number   : /-?[0-9]+/ ;                             \
-    symbol   : /[-a-zA-Z_0-9?!+*\\/]+/ ;                \
-    expr     : <number> | <symbol> | <sexp> | <vector> ;\
-    sexp     : '(' <expr>* ')' ;                        \
-    vector   : '[' <expr>* ']' ;                        \
-    program  : /^/ <expr>* /$/ ;                        \
-  ", Number, Symbol, Expr, Sexp, Vector, Program);
+  mpca_lang(MPCA_LANG_DEFAULT, "                                   \
+    number   : /-?[0-9]+/ ;                                        \
+    symbol   : /[-a-zA-Z_0-9?!+*\\/]+/ ;                           \
+    string   : /\"(\\\\.|[^\"])*\"/ ;                              \
+    expr     : <number> | <symbol> | <string> | <sexp> | <vector> ;\
+    sexp     : '(' <expr>* ')' ;                                   \
+    vector   : '[' <expr>* ']' ;                                   \
+    program  : /^/ <expr>* /$/ ;                                   \
+  ", Number, Symbol, String, Expr, Sexp, Vector, Program);
 
   gc_init();
   vector* toplevel = init_toplevel();
@@ -710,7 +728,7 @@ int main(int argc, char** argv) {
     free(in);
   }
 
-  mpc_cleanup(6, Number, Symbol, Expr, Sexp, Vector, Program);
+  mpc_cleanup(7, Number, Symbol, String, Expr, Sexp, Vector, Program);
 
   return 0;
 }

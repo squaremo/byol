@@ -6,5 +6,6 @@ assert "./lispy '(list)'" '()' "Empty list"
 assert "./lispy '(list 1 2 3)'" "(1 2 3)" "list function"
 assert "./lispy '(lambda [a] a)'" "<function>" "function value"
 assert "./lispy '((lambda [a b] [a b (+ a b)]) 4 5)'" "[4 5 9]" "apply function"
+assert "./lispy '\"foo\"'" '"foo"' "literal string"
 
 assert_end
