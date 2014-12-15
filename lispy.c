@@ -2,6 +2,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <stdarg.h>
+#include <assert.h>
 
 #include <editline/readline.h>
 
@@ -9,8 +10,9 @@
 
 // ==== values
 
-enum lval_tag { LVAL_NUM, LVAL_SYM, LVAL_CONS, LVAL_NIL, LVAL_VEC,
-                LVAL_FUNC, LVAL_PRIM, LVAL_ERR };
+enum lval_tag { LVAL_FWD, LVAL_NUM, LVAL_SYM, LVAL_CONS,
+                LVAL_NIL, LVAL_VEC, LVAL_FUNC, LVAL_PRIM,
+                LVAL_ERR };
 
 typedef intptr_t obj;
 
@@ -36,16 +38,21 @@ typedef struct {
   vector* formals;
   cons* body;
 } closure;
-typedef void nil;
+typedef char nil;
+
+typedef struct {
+  header hdr;
+  obj obj;
+} fwd;
 
 static inline enum lval_tag obj_tag(obj val) {
   return ((header*)val - 1)->tag;
 }
 #define tag(v) (obj_tag((obj)(v)))
 
-/* static inline int obj_size(obj val) {
+static inline int obj_size(obj val) {
   return ((header*)val - 1)->size;
-  }*/
+}
 
 static inline int sym_cmp(symbol* a, symbol* b) {
   return strcmp(a, b);
@@ -63,21 +70,133 @@ static inline obj vec_get(vector* vec, int i) {
   return ((obj*)(vec + 1))[i];
 }
 
-// === constructing values
-
 static inline int round_to_word(int n) {
   return (n + (sizeof(intptr_t) - 1)) & ~(sizeof(intptr_t) - 1);
 }
 
-static inline void* alloc_obj(enum lval_tag tag, int size) {
+// garbage collection
+
+#define STACK_SIZE 2048
+#define HEAP_SIZE 2048
+
+obj** stack;
+int stack_ptr = 0;
+
+void* fromspace;
+void* tospace;
+
+intptr_t next;
+intptr_t limit;
+
+void gc_flip() {
+  void* tmp = fromspace;
+  fromspace = tospace;
+  tospace = tmp;
+  next = (intptr_t)fromspace;
+  limit = (intptr_t)fromspace + HEAP_SIZE;
+}
+
+void gc_init() {
+  stack = malloc(sizeof(obj*) * STACK_SIZE);
+  fromspace = malloc(HEAP_SIZE);
+  tospace = malloc(HEAP_SIZE);
+  gc_flip();
+}
+
+void gc_push_root(obj* root) {
+  stack[stack_ptr++] = root;
+  assert(stack_ptr < STACK_SIZE);
+}
+
+void gc_pop_roots(int entries) {
+  stack_ptr -= entries;
+  assert(stack_ptr >= 0);
+}
+
+#define KEEP(var) gc_push_root((obj*)&(var))
+#define FORGET(num) gc_pop_roots(num)
+
+obj gc_copy(obj o) {
+  if (tag(o) == LVAL_FWD) {
+    fwd* f = (fwd*)o;
+    return f->obj;
+  }
+  else {
+    int bytes = sizeof(header) + obj_size(o) * sizeof(intptr_t);
+    fwd* from = (fwd*)((header*)o - 1);
+    memmove((void*)next, (void*)from, bytes);
+    obj to = (obj)((header*)next + 1);
+    from->hdr.tag = LVAL_FWD;
+    from->obj = to;
+    next += bytes;
+    return to;
+  }
+}
+
+void gc() {
+  gc_flip();
+  // phase one: copy over everything on the stack
+  for (int i = 0; i < stack_ptr; i++) {
+    *stack[i] = gc_copy(*stack[i]);
+  }
+  // phase two: copy over things reachable from anything we copied earlier
+  intptr_t todo = (intptr_t)fromspace;
+  while (todo < next) {
+    header* h = (header*)todo;
+    enum lval_tag tag = h->tag;
+    assert(tag != LVAL_FWD);
+    int bytes = h->size;
+    switch (tag) {
+    case LVAL_CONS:
+      {
+        cons* c = (cons*)(h + 1);
+        c->car = gc_copy(c->car);
+        c->cdr = gc_copy(c->cdr);
+        break;
+      }
+    case LVAL_VEC:
+      {
+        vector* v = (vector*)(h + 1);
+        int count = vec_count(v);
+        for (int i = 0; i < count; i++) {
+          vec_set(v, i, gc_copy(vec_get(v, i)));
+        }
+        break;
+      }
+    case LVAL_FUNC:
+      {
+        closure* c = (closure*)(h + 1);
+        c->formals = (vector*)gc_copy((obj)c->formals);
+        c->env = (vector*)gc_copy((obj)c->env);
+        c->body = (cons*)gc_copy((obj)c->body);
+        break;
+      }
+    default:
+      // nothing else has obj fields
+      break;
+    }
+    todo += bytes;
+  }
+}
+
+static inline obj alloc_obj(enum lval_tag tag, int size) {
   // sizeof(header) will be padded anyway, so the sum will be rounded
-  //printf("Allocating type %d of size %d, rounded to %d\n", tag, size, round_to_word(size));
-  header* h = malloc(sizeof(header) + round_to_word(size));
+  assert(tag != LVAL_FWD);
+  assert(size > 0);
+  int bytes = sizeof(header) + round_to_word(size);
+  if (next + bytes > limit) {
+    gc();
+    return alloc_obj(tag, size);
+  }
+  header* h = (header*)next;
   h->tag = tag;
   // NB size does not include header
   h->size = round_to_word(size) / sizeof(intptr_t);
-  return h + 1;
+  next += bytes;
+  return (obj)(h + 1);
 }
+
+// === constructing values
 
 number* make_num(long value) {
   number* result = (number*)alloc_obj(LVAL_NUM, sizeof(number));
@@ -106,14 +225,18 @@ vector* make_vec(int count) {
 }
 
 cons* make_cons(obj car, obj cdr) {
+  KEEP(car); KEEP(cdr);
   cons* result = (cons*)alloc_obj(LVAL_CONS, sizeof(cons));
+  FORGET(2);
   result->car = car;
   result->cdr = cdr;
   return result;
 }
 
 nil* make_nil() {
-  return alloc_obj(LVAL_NIL, 0);
+  nil* result = (nil*)alloc_obj(LVAL_NIL, 4);
+  strcpy(result, "nil");
+  return result;
 }
 
 prim* make_prim(prim_fun f) {
@@ -123,7 +246,9 @@ prim* make_prim(prim_fun f) {
 }
 
 closure* make_clos(vector* formals, vector* env, cons* body) {
+  KEEP(formals); KEEP(env); KEEP(body);
   closure* result = (closure*)alloc_obj(LVAL_FUNC, sizeof(closure));
+  FORGET(3);
   result->formals = formals;
   result->env = env;
   result->body = body;
@@ -179,7 +304,9 @@ static inline int cons_len(cons* s) {
 
 vector* env_extend(vector* parent, vector* names, vector* vals) {
   int count = vec_count(names);
+  KEEP(parent); KEEP(names); KEEP(vals);
   vector* e = make_vec(count + 2);
+  FORGET(3);
   vec_set(e, 0, (obj)parent);
   vec_set(e, 1, (obj)names);
   for (int i = 0; i < count; i++) {
@@ -231,22 +358,26 @@ obj read_obj(mpc_ast_t* s) {
     }
     int childi = 0;
     vector* res = make_vec(count);
+    KEEP(res);
     for (int i = 0; i < s->children_num; i++) {
       obj child = read_obj(s->children[i]);
       if (child) {
         vec_set(res, childi++, child);
       }
     }
+    FORGET(1);
     return (obj)res;
   }
   else if (strstr(s->tag, "sexp")) {
     cons* list = (cons*)make_nil();
+    KEEP(list);
     for (int i = s->children_num - 1; i >= 0; i--) {
       obj child = read_obj(s->children[i]);
       if (child) {
         list = make_cons(child, (obj)list);
       }
     }
+    FORGET(1);
     return (obj)list;
   }
   return (obj)NULL;
@@ -254,6 +385,8 @@ obj read_obj(mpc_ast_t* s) {
 
 void print_obj(obj v) {
   switch (tag(v)) {
+  case LVAL_FWD:
+    printf("<fwd %ld>", (long)v);
   case LVAL_NUM:
     printf("%li", *(number*)v);
     break;
@@ -311,6 +444,8 @@ void print_env(vector* env) {
   }
 }
 
+// === eeeeeeval
+
 obj eval_cons(vector*, cons*);
 obj eval_vec(vector*, vector*);
 
@@ -336,20 +471,26 @@ obj eval(vector* env, obj e) {
 }
 
 obj eval_vec(vector* env, vector* vec) {
+  KEEP(vec);
+  KEEP(env);
   vector* res = make_vec(vec_count(vec));
+  KEEP(res);
   for (int i = 0; i < vec_count(vec); i++) {
     vec_set(res, i, eval(env, vec_get(vec, i)));
   }
+  FORGET(3);
   return (obj)res;
 }
 
 // assumes a list of expressions, anything else is bad syntax
 obj eval_progn(vector* env, cons* exprs) {
   obj val = (obj)NULL;
+  KEEP(env); KEEP(exprs); KEEP(val);
   while (tag(exprs) == LVAL_CONS) {
     val = eval(env, car(exprs));
     exprs = (cons*)cdr(exprs);
   }
+  FORGET(3);
   return val;
 }
 
@@ -357,9 +498,11 @@ obj eval_progn(vector* env, cons* exprs) {
 // count them first, but oh well. When there's a stack, they can go
 // there.
 obj eval_application(vector* env, obj head, cons* exprs) {
-  obj res;
+  obj res = (obj)NULL;
+  KEEP(env); KEEP(head); KEEP(exprs);
   int count = cons_len(exprs);
   vector* argv = make_vec(count);
+  KEEP(argv);
   int i = 0;
   while (tag(exprs) == LVAL_CONS) {
     vec_set(argv, i++, eval(env, car(exprs)));
@@ -384,38 +527,50 @@ obj eval_application(vector* env, obj head, cons* exprs) {
   else {
     res = (obj)make_err("Not a function in the head of the expression");
   }
+  FORGET(4);
   return res;
 }
 
 obj eval_cons(vector* env, cons* s) {
   obj head = car(s);
+  KEEP(env); KEEP(s); KEEP(head);
   // special forms
+  obj res;
+
   if (tag(head) == LVAL_SYM) {
     if (sym_cmp((symbol*)head, (symbol*)"lambda") == 0) {
       vector* args = (vector*)cadr(s);
       if (tag(args) != LVAL_VEC) {
         //puts("args not a vector "); print_lval(args);
-        return (obj)make_err("Args in lambda must be a vector");
+        res = (obj)make_err("Args in lambda must be a vector");
+        goto end;
       }
       cons* body = (cons*)cddr(s);
       if (tag(body) != LVAL_CONS) {
-        return (obj)make_err("Need expressions for body of lambda");
+        res = (obj)make_err("Need expressions for body of lambda");
+        goto end;
       }
 
       // check we have all symbols
       for (int i = 0; i < vec_count(args); i++) {
         if (tag(vec_get(args, i)) != LVAL_SYM) {
           //puts("formal not a symbol "); print_lval(lvec_get(args, i));
-          return (obj)make_err("Formals of lambda must be symbols");
+          
+          res = (obj)make_err("Formals of lambda must be symbols");
+          goto end;
         }
       }
       closure* c = make_clos(args, env, body);
-      return (obj)c;
+      res = (obj)c;
+      goto end;
     }
   }
   // ok treat it like a function
   head = eval(env, head);
-  return eval_application(env, head, (cons*)cdr(s));
+  res = eval_application(env, head, (cons*)cdr(s));
+ end:
+  FORGET(3);
+  return res;
 }
 
 obj prim_plus(int argc, vector* argv) {
@@ -435,10 +590,12 @@ obj prim_list(int argc, vector* argv) {
     return (obj)make_nil();
   }
   else {
+    KEEP(argv);
     obj res = (obj)make_nil();
     for (int i = vec_count(argv) - 1; i >= 0; i--) {
       res = (obj)make_cons(vec_get(argv, i), res);
     }
+    FORGET(1);
     return res;
   }
 }
@@ -455,6 +612,7 @@ vector* init_toplevel() {
   vec_set(names, 1, (obj)make_sym("list"));
   vec_set(prims, 1, (obj)make_prim(&prim_list));
   
+  // assume we won't do a collection here
   return env_extend(NULL, names, prims) ;
 }
 
@@ -507,7 +665,9 @@ int main(int argc, char** argv) {
     program  : /^/ <expr>* /$/ ;                        \
   ", Number, Symbol, Expr, Sexp, Vector, Program);
 
+  gc_init();
   vector* toplevel = init_toplevel();
+  gc_push_root((obj*)&toplevel);
 
   if (argc > 1) {
     mpc_result_t r;
