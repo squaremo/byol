@@ -80,8 +80,8 @@ static inline int round_to_word(int n) {
 #define STACK_SIZE 2048
 #define HEAP_SIZE 2048
 
-obj** stack;
-int stack_ptr = 0;
+obj** root_stack;
+int root_stack_ptr = 0;
 
 void* fromspace;
 void* tospace;
@@ -98,20 +98,20 @@ void gc_flip() {
 }
 
 void gc_init() {
-  stack = malloc(sizeof(obj*) * STACK_SIZE);
+  root_stack = malloc(sizeof(obj*) * STACK_SIZE);
   fromspace = malloc(HEAP_SIZE);
   tospace = malloc(HEAP_SIZE);
   gc_flip();
 }
 
 void gc_push_root(obj* root) {
-  stack[stack_ptr++] = root;
-  assert(stack_ptr < STACK_SIZE);
+  root_stack[root_stack_ptr++] = root;
+  assert(root_stack_ptr < STACK_SIZE);
 }
 
 void gc_pop_roots(int entries) {
-  stack_ptr -= entries;
-  assert(stack_ptr >= 0);
+  root_stack_ptr -= entries;
+  assert(root_stack_ptr >= 0);
 }
 
 #define KEEP(var) gc_push_root((obj*)&(var))
@@ -137,8 +137,8 @@ obj gc_copy(obj o) {
 void gc() {
   gc_flip();
   // phase one: copy over everything on the stack
-  for (int i = 0; i < stack_ptr; i++) {
-    *stack[i] = gc_copy(*stack[i]);
+  for (int i = 0; i < root_stack_ptr; i++) {
+    *root_stack[i] = gc_copy(*root_stack[i]);
   }
   // phase two: copy over things reachable from anything we copied earlier
   intptr_t todo = (intptr_t)fromspace;
