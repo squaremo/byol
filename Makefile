@@ -9,7 +9,7 @@ clean:
 	rm -f *.o $(TARGET)
 
 lispy: $(SRCS)
-	cc -g -std=c99 -Wall -ledit -lm -o $(TARGET) $^
+	cc -g -std=c99 -Wall -ledit -lm -DDEBUG -o $(TARGET) $^
 
 test: $(TARGET) assert.sh tests.sh
 	sh tests.sh

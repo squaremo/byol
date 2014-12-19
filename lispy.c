@@ -8,6 +8,12 @@
 
 #include "mpc/mpc.h"
 
+#ifdef DEBUG
+#define debug(x) { x; }
+#else
+#define debug(x)
+#endif
+
 // ==== values
 
 enum lval_tag { LVAL_FWD, LVAL_NUM, LVAL_SYM, LVAL_CONS,
@@ -28,7 +34,7 @@ typedef char err;
 typedef struct {
   int count;
 } vector;
-typedef obj (*prim_fun)(int, vector*);
+typedef obj (*prim_fun)(vector*);
 typedef prim_fun prim;
 typedef struct {
   obj car;
@@ -396,6 +402,7 @@ obj read_obj(mpc_ast_t* s) {
 }
 
 void print_obj(obj v) {
+  if (v == (obj)NULL) { printf("<undefined>"); return; }
   switch (tag(v)) {
   case LVAL_FWD:
     printf("<fwd %ld>", (long)v);
@@ -461,137 +468,94 @@ void print_env(vector* env) {
 
 // === eeeeeeval
 
-obj eval_cons(vector*, cons*);
-obj eval_vec(vector*, vector*);
+typedef struct {
+  vector* env;
+  vector* args;
+  int fill;
+} frame;
 
-obj eval(vector* env, obj e) {
-  switch (tag(e)) {
-  case LVAL_NUM:
-  case LVAL_STR:
-    return e;
-  case LVAL_SYM:
-    {
-      obj v = env_lookup(env, (symbol*)e);
-      if (v == (obj)NULL) return (obj)make_err("Undefined variable");
-      else return v;
+void print_frame(frame* f) {
+  puts("=frame:");
+  puts("==args");
+  print_obj((obj)f->args);
+  puts("==env");
+  print_env(f->env);
+}
+
+frame* stack;
+int stackptr;
+
+obj eval_loop(vector* toplevel, obj expr) {
+
+  stack = malloc(sizeof(frame) * STACK_SIZE);
+  stackptr = -1;
+
+  obj val = expr;
+  vector* env = toplevel;
+  KEEP(val); KEEP(env);
+
+  do {
+    debug(print_obj(val)); debug(printf(" -> "));
+    switch (tag(val)) {
+    case LVAL_CONS:
+      {
+        frame* f = &stack[++stackptr];
+        int len = cons_len((cons*)val);
+        f->env = env;
+        f->args = make_vec(len + 1);
+        vec_set(f->args, 0, cdr((cons*)val));
+        f->fill = 1;
+        val = car((cons*)val);
+        debug(printf("pushed frame size %d\n", len));
+        debug(print_frame(f));
+        break;
+      }
+    case LVAL_SYM:
+      debug(printf("lookup %s", (char*)val));
+      val = env_lookup(env, (symbol*)val);
+      debug(printf(", found ")); debug(print_obj(val)); debug(puts(""));
+      // fall through
+    default:
+      {
+        if (stackptr < 0) break;
+        frame* f = &stack[stackptr];
+        debug(printf("stack frame at %d\n", stackptr));
+        debug(print_frame(f));
+        vec_set(f->args, f->fill++, val);
+        debug(printf("set slot %d to ", f->fill - 1));
+        debug(print_obj(val)); debug(putchar('\n'));
+        cons* todo = (cons*)vec_get(f->args, 0);
+        if (tag(todo) == LVAL_NIL) {
+          stackptr--; // now or later, for GC?
+          obj head = vec_get(f->args, 1);
+          if (tag(head) == LVAL_FUNC) {
+            closure* func = (closure*)head;
+            vec_set(f->args, 1, (obj)func->formals);
+            vec_set(f->args, 0, (obj)f->env);
+            env = f->args;
+            val = (obj)func->body;
+          }
+          else if (tag(head) == LVAL_PRIM) {
+            prim_fun func = *(prim*)head;
+            // don't care about formals or parent env
+            val = func(f->args);
+          }
+        }
+        else {
+          vec_set(f->args, 0, cdr(todo));
+          val = car(todo);          
+        }
+        break;
+      }
     }
-  case LVAL_VEC:
-    return eval_vec(env, (vector*)e);
-  case LVAL_NIL:
-    return e;
-  case LVAL_CONS:
-    return eval_cons(env, (cons*)e);
-  default:
-    return (obj)make_err("I can't eval this");
-  }
-}
-
-obj eval_vec(vector* env, vector* vec) {
-  KEEP(vec);
-  KEEP(env);
-  vector* res = make_vec(vec_count(vec));
-  KEEP(res);
-  for (int i = 0; i < vec_count(vec); i++) {
-    vec_set(res, i, eval(env, vec_get(vec, i)));
-  }
-  FORGET(3);
-  return (obj)res;
-}
-
-// assumes a list of expressions, anything else is bad syntax
-obj eval_progn(vector* env, cons* exprs) {
-  obj val = (obj)NULL;
-  KEEP(env); KEEP(exprs); KEEP(val);
-  while (tag(exprs) == LVAL_CONS) {
-    val = eval(env, car(exprs));
-    exprs = (cons*)cdr(exprs);
-  }
-  FORGET(3);
+  } while (stackptr > -1);
+  FORGET(2);
   return val;
 }
 
-// Calling convention: stick 'em in a vector. This means we have to
-// count them first, but oh well. When there's a stack, they can go
-// there.
-obj eval_application(vector* env, obj head, cons* exprs) {
-  obj res = (obj)NULL;
-  KEEP(env); KEEP(head); KEEP(exprs);
-  int count = cons_len(exprs);
-  vector* argv = make_vec(count);
-  KEEP(argv);
-  int i = 0;
-  while (tag(exprs) == LVAL_CONS) {
-    vec_set(argv, i++, eval(env, car(exprs)));
-    exprs = (cons*)cdr(exprs);
-  }
-
-  if (tag(head) == LVAL_PRIM) {
-    prim_fun f = *(prim*)head;
-    // arity??
-    res = f(count, argv);
-  }
-  else if (tag(head) == LVAL_FUNC) {
-    closure* f = (closure*)head;
-    if (vec_count(f->formals) != count) {
-      res = (obj)make_err("Wrong arity");
-    }
-    else {
-      vector* newenv = env_extend(f->env, f->formals, argv);
-      res = eval_progn(newenv, f->body);
-    }
-  }
-  else {
-    res = (obj)make_err("Not a function in the head of the expression");
-  }
-  FORGET(4);
-  return res;
-}
-
-obj eval_cons(vector* env, cons* s) {
-  obj head = car(s);
-  KEEP(env); KEEP(s); KEEP(head);
-  // special forms
-  obj res;
-
-  if (tag(head) == LVAL_SYM) {
-    if (sym_cmp((symbol*)head, (symbol*)"lambda") == 0) {
-      vector* args = (vector*)cadr(s);
-      if (tag(args) != LVAL_VEC) {
-        //puts("args not a vector "); print_lval(args);
-        res = (obj)make_err("Args in lambda must be a vector");
-        goto end;
-      }
-      cons* body = (cons*)cddr(s);
-      if (tag(body) != LVAL_CONS) {
-        res = (obj)make_err("Need expressions for body of lambda");
-        goto end;
-      }
-
-      // check we have all symbols
-      for (int i = 0; i < vec_count(args); i++) {
-        if (tag(vec_get(args, i)) != LVAL_SYM) {
-          //puts("formal not a symbol "); print_lval(lvec_get(args, i));
-          
-          res = (obj)make_err("Formals of lambda must be symbols");
-          goto end;
-        }
-      }
-      closure* c = make_clos(args, env, body);
-      res = (obj)c;
-      goto end;
-    }
-  }
-  // ok treat it like a function
-  head = eval(env, head);
-  res = eval_application(env, head, (cons*)cdr(s));
- end:
-  FORGET(3);
-  return res;
-}
-
-obj prim_plus(int argc, vector* argv) {
+obj prim_plus(vector* argv) {
   long result = 0;
-  for (int i = 0; i < argc; i++) {
+  for (int i = 2; i < vec_count(argv); i++) {
     obj arg = vec_get(argv, i);
     if (tag(arg) != LVAL_NUM) {
       return (obj)make_err("Arguments to + must be numbers");
@@ -601,19 +565,14 @@ obj prim_plus(int argc, vector* argv) {
   return (obj)make_num(result);
 }
 
-obj prim_list(int argc, vector* argv) {
-  if (argc == 0) {
-    return (obj)make_nil();
+obj prim_list(vector* argv) {
+  KEEP(argv);
+  obj res = (obj)make_nil();
+  for (int i = vec_count(argv) - 1; i >= 2; i--) {
+    res = (obj)make_cons(vec_get(argv, i), res);
   }
-  else {
-    KEEP(argv);
-    obj res = (obj)make_nil();
-    for (int i = vec_count(argv) - 1; i >= 0; i--) {
-      res = (obj)make_cons(vec_get(argv, i), res);
-    }
-    FORGET(1);
-    return res;
-  }
+  FORGET(1);
+  return res;
 }
 
 vector* init_toplevel() {
@@ -639,7 +598,7 @@ void eval_root(vector* toplevel, mpc_ast_t* root) {
     if (inval) {
       if (multi) putchar('\n');
       //printf(";; "); print_obj(inval); puts(" ->");
-      obj res = eval(toplevel, inval);
+      obj res = eval_loop(toplevel, inval);
       print_obj(res);
       multi = 1;
     }
