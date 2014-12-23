@@ -507,13 +507,15 @@ frame* stack;
 int stackptr;
 
 int eval_special(cons* expr, obj* valreg, vector** envreg) {
+  KEEP(expr);
+  int result = 0;
   obj head = car(expr);
   if (tag(head) == LVAL_SYM) {
     if (strcmp(sym_name((symbol*)head), "lambda") == 0) {
       vector* args = (vector*)cadr(expr);
       cons* body = (cons*)car((cons*)cddr(expr));
       *valreg = (obj)make_clos(args, *envreg, body);
-      return 1;
+      result = 1;
     }
     else if (strcmp(sym_name((symbol*)head), "if") == 0) {
       vector* ks = make_vec(2);
@@ -523,11 +525,30 @@ int eval_special(cons* expr, obj* valreg, vector** envreg) {
       frame* f = &stack[++stackptr];
       f->type = FRAME_IF;
       f->args = ks;
-      return 1;
+      result = 1;
     }
-    else return 0;
+    else if (strcmp(sym_name((symbol*)head), "do") == 0) {
+      int len = cons_len(expr) - 1;
+      *valreg = cadr(expr);
+      if (len > 1) {
+        vector* exprs = make_vec(len - 1);
+        frame* f = &stack[++stackptr];
+        f->type = FRAME_PROGN;
+        f->fill = 0;
+        expr = (cons*)cddr(expr);
+        while (tag(expr) == LVAL_CONS) {
+          vec_set(exprs, f->fill++, car((cons*)expr));
+          expr = (cons*)cdr((cons*)expr);
+        }
+        f->args = exprs;
+        f->fill = 0;
+      }
+      result = 1;
+    }
+    else result = 0;
   }
-  else return 0;
+  FORGET(1);
+  return result;
 }
 
 obj eval_loop(vector* toplevel, obj expr) {
@@ -614,7 +635,7 @@ obj eval_loop(vector* toplevel, obj expr) {
     goto eval;
 
   case FRAME_PROGN:
-    if (f->fill < vec_count(f->args) - 2) {
+    if (f->fill < vec_count(f->args) - 1) {
       val = vec_get(f->args, f->fill++);
     }
     else {
