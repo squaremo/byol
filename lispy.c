@@ -477,7 +477,7 @@ void print_env(vector* env) {
 
 // === eeeeeeval
 
-enum frame_type { FRAME_EMPTY, FRAME_APPLY, FRAME_IF, FRAME_PROGN };
+enum frame_type { FRAME_EMPTY, FRAME_APPLY, FRAME_IF, FRAME_PROGN, FRAME_VEC };
 
 typedef struct {
   enum frame_type type;
@@ -492,6 +492,7 @@ static inline char* frame_type(enum frame_type t) {
   case FRAME_APPLY: return "funcall";
   case FRAME_IF: return "if";
   case FRAME_PROGN: return "do";
+  case FRAME_VEC: return "vector";
   }
 }
 
@@ -580,6 +581,16 @@ obj eval_loop(vector* toplevel, obj expr) {
       }
       goto eval;
     }
+  case LVAL_VEC:
+    {
+      if (vec_count((vector*)val) == 0) goto apply_k;
+      frame* f = &stack[++stackptr];
+      f->type = FRAME_VEC;
+      f->args = (vector*)val;
+      f->fill = 0;
+      val = vec_get(f->args, 0);
+    }
+    goto eval;
   case LVAL_SYM:
     debug(printf("lookup %s", sym_name((symbol*)val)));
     val = env_lookup(env, (symbol*)val);
@@ -609,13 +620,14 @@ obj eval_loop(vector* toplevel, obj expr) {
         vec_set(f->args, 0, (obj)f->env);
         env = f->args;
         val = (obj)func->body;
+        goto eval;
       }
       else if (tag(head) == LVAL_PRIM) {
         prim_fun func = *(prim*)head;
         // don't care about formals or parent env
         val = func(f->args);
+        goto apply_k;
       }
-      goto apply_k;
     }
     else {
       vec_set(f->args, 0, cdr(todo));
@@ -623,6 +635,18 @@ obj eval_loop(vector* toplevel, obj expr) {
       goto eval;
     }
   }
+
+  case FRAME_VEC:
+    vec_set(f->args, f->fill++, val);
+    if (f->fill < vec_count(f->args)) {
+      val = vec_get(f->args, f->fill);
+      goto eval;
+    }
+    else {
+      stackptr--;
+      val = (obj)f->args;
+      goto apply_k;
+    }
 
   case FRAME_IF:
     if (lval_truthy(val)) {
