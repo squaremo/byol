@@ -507,6 +507,16 @@ int eval_special(cons* expr, obj* valreg, vector** envreg) {
       *valreg = (obj)make_clos(args, *envreg, body);
       return 1;
     }
+    else if (strcmp(sym_name((symbol*)head), "if") == 0) {
+      vector* ks = make_vec(2);
+      vec_set(ks, 0, car((cons*)cddr(expr)));
+      vec_set(ks, 1, cadr((cons*)cddr(expr)));
+      *valreg = cadr(expr);
+      frame* f = &stack[++stackptr];
+      f->type = FRAME_IF;
+      f->args = ks;
+      return 1;
+    }
     else return 0;
   }
   else return 0;
@@ -516,97 +526,99 @@ obj eval_loop(vector* toplevel, obj expr) {
 
   stack = malloc(sizeof(frame) * STACK_SIZE);
   stackptr = 0;
-  frame* f = &stack[0];
-  f->type = FRAME_EMPTY;
+  frame* mt = &stack[0];
+  mt->type = FRAME_EMPTY;
 
   obj val = expr;
   vector* env = toplevel;
   KEEP(val); KEEP(env);
 
-  while (stackptr > -1) {
-    debug(print_obj(val)); debug(printf(" -> "));
-    switch (tag(val)) {
-    case LVAL_CONS:
-      {
-        if (!eval_special((cons*)val, &val, &env)) {
-          int len = cons_len((cons*)val);
-          frame* f = &stack[++stackptr];
-          f->type = FRAME_APPLY;
-          f->env = env;
-          f->args = make_vec(len + 1);
-          vec_set(f->args, 0, cdr((cons*)val));
-          f->fill = 1;
-          val = car((cons*)val);
-          debug(printf("pushed frame size %d\n", len));
-          debug(print_frame(f));
-        }
-        break;
-      }
-    case LVAL_SYM:
-      debug(printf("lookup %s", sym_name((symbol*)val)));
-      val = env_lookup(env, (symbol*)val);
-      debug(printf(", found ")); debug(print_obj(val)); debug(puts(""));
-      // fall through
-    default:
-      {
-        frame* f = &stack[stackptr];
-        debug(printf("stack frame at %d\n", stackptr));
+ eval:
+  switch (tag(val)) {
+  case LVAL_CONS:
+    {
+      if (!eval_special((cons*)val, &val, &env)) {
+        int len = cons_len((cons*)val);
+        frame* f = &stack[++stackptr];
+        f->type = FRAME_APPLY;
+        f->env = env;
+        f->args = make_vec(len + 1);
+        vec_set(f->args, 0, cdr((cons*)val));
+        f->fill = 1;
+        val = car((cons*)val);
+        debug(printf("pushed frame size %d\n", len));
         debug(print_frame(f));
-        switch (f->type) {
-        case FRAME_APPLY: {
-          vec_set(f->args, f->fill++, val);
-          debug(printf("set slot %d to ", f->fill - 1));
-          debug(print_obj(val)); debug(putchar('\n'));
-          cons* todo = (cons*)vec_get(f->args, 0);
-          if (tag(todo) == LVAL_NIL) {
-            stackptr--; // now or later, for GC?
-            obj head = vec_get(f->args, 1);
-            if (tag(head) == LVAL_FUNC) {
-              closure* func = (closure*)head;
-              vec_set(f->args, 1, (obj)func->formals);
-              vec_set(f->args, 0, (obj)f->env);
-              env = f->args;
-              val = (obj)func->body;
-            }
-            else if (tag(head) == LVAL_PRIM) {
-              prim_fun func = *(prim*)head;
-              // don't care about formals or parent env
-              val = func(f->args);
-            }
-          }
-          else {
-            vec_set(f->args, 0, cdr(todo));
-            val = car(todo);          
-          }
-          break;
-        }
-        case FRAME_IF:
-          if (lval_truthy(val)) {
-            val = vec_get(f->args, 0);
-          }
-          else {
-            val = vec_get(f->args, 1);
-            stackptr--;
-          }
-          break;
-        case FRAME_PROGN:
-          if (f->fill < vec_count(f->args) - 2) {
-            val = vec_get(f->args, f->fill++);
-          }
-          else {
-            val = vec_get(f->args, f->fill++);
-            stackptr--;
-          }
-          break;
-        case FRAME_EMPTY:
-          stackptr--;
-          break;
-        }
       }
+      goto eval;
+    }
+  case LVAL_SYM:
+    debug(printf("lookup %s", sym_name((symbol*)val)));
+    val = env_lookup(env, (symbol*)val);
+    debug(printf(", found ")); debug(print_obj(val)); debug(puts(""));
+    goto apply_k;
+  default:
+    goto apply_k;
+  }
+  
+ apply_k:
+  assert(stackptr >= 0);
+  frame* f = &stack[stackptr];
+  debug(printf("stack frame at %d\n", stackptr));
+  debug(print_frame(f));
+  switch (f->type) {
+  case FRAME_APPLY: {
+    vec_set(f->args, f->fill++, val);
+    debug(printf("set slot %d to ", f->fill - 1));
+    debug(print_obj(val)); debug(putchar('\n'));
+    cons* todo = (cons*)vec_get(f->args, 0);
+    if (tag(todo) == LVAL_NIL) {
+      stackptr--; // now or later, for GC?
+      obj head = vec_get(f->args, 1);
+      if (tag(head) == LVAL_FUNC) {
+        closure* func = (closure*)head;
+        vec_set(f->args, 1, (obj)func->formals);
+        vec_set(f->args, 0, (obj)f->env);
+        env = f->args;
+        val = (obj)func->body;
+      }
+      else if (tag(head) == LVAL_PRIM) {
+        prim_fun func = *(prim*)head;
+        // don't care about formals or parent env
+        val = func(f->args);
+      }
+      goto apply_k;
+    }
+    else {
+      vec_set(f->args, 0, cdr(todo));
+      val = car(todo);
+      goto eval;
     }
   }
-  FORGET(2);
-  return val;
+
+  case FRAME_IF:
+    if (lval_truthy(val)) {
+      val = vec_get(f->args, 0);
+    }
+    else {
+      val = vec_get(f->args, 1);
+    }
+    stackptr--;
+    goto eval;
+
+  case FRAME_PROGN:
+    if (f->fill < vec_count(f->args) - 2) {
+      val = vec_get(f->args, f->fill++);
+    }
+    else {
+      val = vec_get(f->args, f->fill++);
+      stackptr--;
+    }
+    goto eval;
+
+  case FRAME_EMPTY:
+    FORGET(2);
+    return val;
+  }
 }
 
 obj prim_plus(vector* argv) {
@@ -624,10 +636,11 @@ obj prim_plus(vector* argv) {
 obj prim_list(vector* argv) {
   KEEP(argv);
   obj res = (obj)make_nil();
+  KEEP(res);
   for (int i = vec_count(argv) - 1; i >= 2; i--) {
     res = (obj)make_cons(vec_get(argv, i), res);
   }
-  FORGET(1);
+  FORGET(2);
   return res;
 }
 
