@@ -486,13 +486,21 @@ typedef struct {
   int fill;
 } frame;
 
+static inline char* frame_type(enum frame_type t) {
+  switch (t) {
+  case FRAME_EMPTY: return "empty";
+  case FRAME_APPLY: return "funcall";
+  case FRAME_IF: return "if";
+  case FRAME_PROGN: return "do";
+  }
+}
+
 void print_frame(frame* f) {
-  puts("=frame:");
-  puts("==args");
+  printf("--frame (%s)--\n", frame_type(f->type));
+  puts("---args---");
   print_obj((obj)f->args); putchar('\n');
-  puts("==env");
   print_env(f->env);
-  puts("===");
+  puts("-----");
 }
 
 frame* stack;
