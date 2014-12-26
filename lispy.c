@@ -482,7 +482,7 @@ enum frame_type { FRAME_EMPTY, FRAME_APPLY, FRAME_IF, FRAME_PROGN, FRAME_VEC };
 typedef struct {
   enum frame_type type;
   vector* env;
-  vector* args;
+  obj args;
   int fill;
 } frame;
 
@@ -499,7 +499,7 @@ static inline char* frame_type(enum frame_type t) {
 void print_frame(frame* f) {
   printf("--frame (%s)--\n", frame_type(f->type));
   puts("---args---");
-  print_obj((obj)f->args); putchar('\n');
+  print_obj(f->args); putchar('\n');
   print_env(f->env);
   puts("-----");
 }
@@ -514,7 +514,10 @@ int eval_special(cons* expr, obj* valreg, vector** envreg) {
   if (tag(head) == LVAL_SYM) {
     if (strcmp(sym_name((symbol*)head), "lambda") == 0) {
       vector* args = (vector*)cadr(expr);
-      cons* body = (cons*)car((cons*)cddr(expr));
+      cons* body = (cons*)cddr(expr);
+      debug(puts("Making lambda"));
+      debug(print_obj((obj)args)); debug(putchar('\n'));
+      debug(print_obj((obj)body)); debug(putchar('\n'));
       *valreg = (obj)make_clos(args, *envreg, body);
       result = 1;
     }
@@ -525,23 +528,17 @@ int eval_special(cons* expr, obj* valreg, vector** envreg) {
       *valreg = cadr(expr);
       frame* f = &stack[++stackptr];
       f->type = FRAME_IF;
-      f->args = ks;
+      f->args = (obj)ks;
       result = 1;
     }
     else if (strcmp(sym_name((symbol*)head), "do") == 0) {
       int len = cons_len(expr) - 1;
       *valreg = cadr(expr);
       if (len > 1) {
-        vector* exprs = make_vec(len - 1);
         frame* f = &stack[++stackptr];
         f->type = FRAME_PROGN;
         f->fill = 0;
-        expr = (cons*)cddr(expr);
-        while (tag(expr) == LVAL_CONS) {
-          vec_set(exprs, f->fill++, car((cons*)expr));
-          expr = (cons*)cdr((cons*)expr);
-        }
-        f->args = exprs;
+        f->args = cddr(expr);
         f->fill = 0;
       }
       result = 1;
@@ -572,8 +569,8 @@ obj eval_loop(vector* toplevel, obj expr) {
         frame* f = &stack[++stackptr];
         f->type = FRAME_APPLY;
         f->env = env;
-        f->args = make_vec(len + 1);
-        vec_set(f->args, 0, cdr((cons*)val));
+        f->args = (obj)make_vec(len + 1);
+        vec_set((vector*)f->args, 0, cdr((cons*)val));
         f->fill = 1;
         val = car((cons*)val);
         debug(printf("pushed frame size %d\n", len));
@@ -586,9 +583,9 @@ obj eval_loop(vector* toplevel, obj expr) {
       if (vec_count((vector*)val) == 0) goto apply_k;
       frame* f = &stack[++stackptr];
       f->type = FRAME_VEC;
-      f->args = (vector*)val;
+      f->args = val;
       f->fill = 0;
-      val = vec_get(f->args, 0);
+      val = vec_get((vector*)f->args, 0);
     }
     goto eval;
   case LVAL_SYM:
@@ -607,63 +604,75 @@ obj eval_loop(vector* toplevel, obj expr) {
   debug(print_frame(f));
   switch (f->type) {
   case FRAME_APPLY: {
-    vec_set(f->args, f->fill++, val);
+    vec_set((vector*)f->args, f->fill++, val);
     debug(printf("set slot %d to ", f->fill - 1));
     debug(print_obj(val)); debug(putchar('\n'));
-    cons* todo = (cons*)vec_get(f->args, 0);
+    cons* todo = (cons*)vec_get((vector*)f->args, 0);
     if (tag(todo) == LVAL_NIL) {
-      stackptr--; // now or later, for GC?
-      obj head = vec_get(f->args, 1);
+      obj head = vec_get((vector*)f->args, 1);
       if (tag(head) == LVAL_FUNC) {
         closure* func = (closure*)head;
-        vec_set(f->args, 1, (obj)func->formals);
-        vec_set(f->args, 0, (obj)f->env);
-        env = f->args;
-        val = (obj)func->body;
+        vec_set((vector*)f->args, 1, (obj)func->formals);
+        vec_set((vector*)f->args, 0, (obj)f->env);
+        env = (vector*)f->args;
+        if (tag(cdr(func->body)) == LVAL_CONS) {
+          // NB reuse stack frame
+          f->type = FRAME_PROGN;
+          f->args = cdr(func->body);
+          f->fill = 0;
+          val = car(func->body);
+        }
+        else {
+          stackptr--;
+          val = car(func->body);
+        }
         goto eval;
       }
       else if (tag(head) == LVAL_PRIM) {
+        stackptr--;
         prim_fun func = *(prim*)head;
         // don't care about formals or parent env
-        val = func(f->args);
+        val = func((vector*)f->args);
         goto apply_k;
       }
     }
     else {
-      vec_set(f->args, 0, cdr(todo));
+      vec_set((vector*)f->args, 0, cdr(todo));
       val = car(todo);
       goto eval;
     }
   }
 
   case FRAME_VEC:
-    vec_set(f->args, f->fill++, val);
-    if (f->fill < vec_count(f->args)) {
-      val = vec_get(f->args, f->fill);
+    vec_set((vector*)f->args, f->fill++, val);
+    if (f->fill < vec_count((vector*)f->args)) {
+      val = vec_get((vector*)f->args, f->fill);
       goto eval;
     }
     else {
       stackptr--;
-      val = (obj)f->args;
+      val = f->args;
       goto apply_k;
     }
 
   case FRAME_IF:
     if (lval_truthy(val)) {
-      val = vec_get(f->args, 0);
+      val = vec_get((vector*)f->args, 0);
     }
     else {
-      val = vec_get(f->args, 1);
+      val = vec_get((vector*)f->args, 1);
     }
     stackptr--;
     goto eval;
 
   case FRAME_PROGN:
-    if (f->fill < vec_count(f->args) - 1) {
-      val = vec_get(f->args, f->fill++);
+    if (tag(f->args) == LVAL_CONS &&
+        tag(cdr((cons*)f->args)) == LVAL_CONS) {
+      val = car((cons*)f->args);
+      f->args = cdr((cons*)f->args);
     }
     else {
-      val = vec_get(f->args, f->fill++);
+      val = car((cons*)f->args);
       stackptr--;
     }
     goto eval;
