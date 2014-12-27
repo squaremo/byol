@@ -149,12 +149,16 @@ obj gc_copy(obj o) {
   }
 }
 
+void gc_copy_frame_stack();
+
 void gc() {
   gc_flip();
-  // phase one: copy over everything on the stack
+  // phase one: copy over everything on the root stack and frame stack
   for (int i = 0; i < root_stack_ptr; i++) {
     *root_stack[i] = gc_copy(*root_stack[i]);
   }
+  gc_copy_frame_stack();
+
   // phase two: copy over things reachable from anything we copied earlier
   intptr_t todo = (intptr_t)fromspace;
   while (todo < next) {
@@ -479,7 +483,7 @@ void print_env(vector* env) {
 
 enum frame_type { FRAME_EMPTY, FRAME_APPLY, FRAME_IF, FRAME_PROGN, FRAME_VEC };
 
-typedef struct {
+typedef struct frame {
   enum frame_type type;
   vector* env;
   obj args;
@@ -506,6 +510,14 @@ void print_frame(frame* f) {
 
 frame* stack;
 int stackptr;
+
+void gc_copy_frame_stack() {
+  for (int i = 0; i <= stackptr; i++) {
+    frame* f = &stack[stackptr];
+    f->args = gc_copy((obj)f->args);
+    f->env = (vector*)gc_copy((obj)f->env);
+  }
+}
 
 int eval_special(cons* expr, obj* valreg, vector** envreg) {
   KEEP(expr);
