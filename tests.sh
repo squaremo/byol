@@ -10,10 +10,17 @@ assert "./lispy '(lambda [a] a)'" "<function>" "function value"
 assert "./lispy '\"foo\"'" '"foo"' "literal string"
 assert_end
 
+echo arith
+assert "./lispy '(+ 1 4)'" "5"
+assert "./lispy '(- 4 1)'" "3"
+assert "./lispy '(* 6 4)'" "24"
+assert "./lispy '(/ 10 3)'" "3"
+assert_end
+
 echo syntax
 assert "./lispy '(do 1 2 3)'" "3" "do syntax"
-assert "./lispy '(if (list) 1 2)'" "2" "if alternate"
-assert "./lispy '(if (list 1) 1 2)'" "1" "if consequent"
+assert "./lispy '(if (< 1 2) 1 2)'" "1" "if consequent"
+assert "./lispy '(if (> 1 2) 1 2)'" "2" "if alternate"
 assert_end
 
 echo builtins

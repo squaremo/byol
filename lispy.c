@@ -87,7 +87,8 @@ static inline int round_to_word(int n) {
 }
 
 static inline int lval_truthy(obj v) {
-  return !(tag(v) == LVAL_NIL);
+  return !(tag(v) == LVAL_SYM &&
+           strcmp(sym_name((symbol*)v), "false") == 0);
 }
 
 // garbage collection
@@ -714,17 +715,59 @@ obj eval_loop(vector* toplevel, obj expr) {
   }
 }
 
-obj prim_plus(vector* argv) {
-  long result = 0;
-  for (int i = 2; i < vec_count(argv); i++) {
-    obj arg = vec_get(argv, i);
-    if (tag(arg) != LVAL_NUM) {
-      return (obj)make_err("Arguments to + must be numbers");
-    }
-    result += *(number*)arg;
+#define NUM_OP(cname, op, zero, sname)                                  \
+  obj cname(vector* argv) {                                             \
+    if (vec_count(argv) < 3) {                                          \
+      return (obj)make_num(zero);                                       \
+    }                                                                   \
+    obj arg = vec_get(argv, 2);                                         \
+    if (! tag(arg) == LVAL_NUM) {                                       \
+      return (obj)make_err("Arguments to " #sname " must be numbers");  \
+    }                                                                   \
+    long result = *(number*)arg;                                        \
+    for (int i = 3; i < vec_count(argv); i++) {                         \
+      arg = vec_get(argv, i);                                           \
+      if (tag(arg) != LVAL_NUM) {                                       \
+        return (obj)make_err("Arguments to " #sname " must be numbers"); \
+      }                                                                 \
+      result = result op *(number*)arg;                                 \
+    }                                                                   \
+    return (obj)make_num(result);                                       \
+  }                                                                     \
+
+NUM_OP(prim_plus, +, 0, +);
+NUM_OP(prim_minus, -, 0, -);
+NUM_OP(prim_mult, *, 1, *);
+NUM_OP(prim_div, /, 1, /);
+
+#define NUM_COMP(cname, comp, sname) obj cname(vector* argv) {          \
+    if (vec_count(argv) < 3) {                                          \
+      return (obj)make_sym("true");                                     \
+    }                                                                   \
+    obj arg = vec_get(argv, 2);                                         \
+    if (tag(arg) != LVAL_NUM) {                                         \
+      return (obj)make_err("Arguments to " #sname " must be numbers");  \
+    }                                                                   \
+    long a = *(number*)arg;                                             \
+    for (int i = 3; i < vec_count(argv); i++) {                         \
+      arg = vec_get(argv, i);                                           \
+      if (tag(arg) != LVAL_NUM) {                                       \
+        return (obj)make_err("Arguments to " #sname " must be numbers"); \
+      }                                                                 \
+      long b = *(number*)arg;                                           \
+      if (!(a comp b)) {                                                \
+        return (obj)make_sym("false");                                  \
+      }                                                                 \
+      a = b;                                                            \
+    }                                                                   \
+    return (obj)make_sym("true");                                       \
   }
-  return (obj)make_num(result);
-}
+
+NUM_COMP(prim_numeq, ==, =);
+NUM_COMP(prim_lt, <, <);
+NUM_COMP(prim_lte, <=, <=);
+NUM_COMP(prim_gt, >, >);
+NUM_COMP(prim_gte, >=, >=);
 
 obj prim_list(vector* argv) {
   KEEP(argv);
@@ -738,16 +781,31 @@ obj prim_list(vector* argv) {
 }
 
 vector* init_toplevel() {
-  int c = 2;
+  int c = 10;
 
   vector* names = make_vec(c);
   vector* prims = make_vec(c);
 
   vec_set(names, 0, (obj)make_sym("+"));
   vec_set(prims, 0, (obj)make_prim(&prim_plus));
-
-  vec_set(names, 1, (obj)make_sym("list"));
-  vec_set(prims, 1, (obj)make_prim(&prim_list));
+  vec_set(names, 1, (obj)make_sym("-"));
+  vec_set(prims, 1, (obj)make_prim(&prim_minus));
+  vec_set(names, 2, (obj)make_sym("*"));
+  vec_set(prims, 2, (obj)make_prim(&prim_mult));
+  vec_set(names, 3, (obj)make_sym("/"));
+  vec_set(prims, 3, (obj)make_prim(&prim_div));
+  vec_set(names, 4, (obj)make_sym("<"));
+  vec_set(prims, 4, (obj)make_prim(&prim_lt));
+  vec_set(names, 5, (obj)make_sym("<="));
+  vec_set(prims, 5, (obj)make_prim(&prim_lte));
+  vec_set(names, 6, (obj)make_sym(">"));
+  vec_set(prims, 6, (obj)make_prim(&prim_gt));
+  vec_set(names, 7, (obj)make_sym(">="));
+  vec_set(prims, 7, (obj)make_prim(&prim_gte));
+  vec_set(names, 8, (obj)make_sym("="));
+  vec_set(prims, 8, (obj)make_prim(&prim_numeq));
+  vec_set(names, 9, (obj)make_sym("list"));
+  vec_set(prims, 9, (obj)make_prim(&prim_list));
   
   // assume we won't do a collection here
   return env_extend(NULL, names, prims) ;
@@ -796,7 +854,7 @@ int main(int argc, char** argv) {
   
   mpca_lang(MPCA_LANG_DEFAULT, "                                   \
     number   : /-?[0-9]+/ ;                                        \
-    symbol   : /[-a-zA-Z_0-9?!+*\\/]+/ ;                           \
+    symbol   : /[-<>=+*\\/a-zA-Z_0-9!?]+/ ;                        \
     string   : /\"(\\\\.|[^\"])*\"/ ;                              \
     expr     : <number> | <symbol> | <string> | <sexp> | <vector> ;\
     sexp     : '(' <expr>* ')' ;                                   \
