@@ -644,20 +644,30 @@ static inline void stack_pop(vector** env) {
   stackptr--;
 }
 
+#define SYNTAX_APPLY 2
+#define SYNTAX_EVAL  1
+#define SYNTAX_NONE  0
+
 int eval_special(cons* expr, obj* valreg, vector** envreg) {
   KEEP(expr);
-  int result = 1;
+  int result = SYNTAX_EVAL;
   obj head = car(expr);
   if (lval_is_sym(head)) {
-    if (strcmp(sym_name(head), "lambda") == 0) {
+    char* name = sym_name(head);
+    if (strcmp(name, "quote") == 0) {
+      *valreg = cadr(expr);
+      result = SYNTAX_APPLY;
+    }
+    else if (strcmp(name, "lambda") == 0) {
       vector* args = (vector*)cadr(expr);
       cons* body = (cons*)cddr(expr);
       debug(puts("Making lambda"));
       debug(print_obj((obj)args)); debug(putchar('\n'));
       debug(print_obj((obj)body)); debug(putchar('\n'));
       *valreg = (obj)make_clos(args, *envreg, body);
+      result = SYNTAX_APPLY;
     }
-    else if (strcmp(sym_name(head), "if") == 0) {
+    else if (strcmp(name, "if") == 0) {
       vector* ks = make_vec(2);
       vec_set(ks, 0, car((cons*)cddr(expr)));
       vec_set(ks, 1, cadr((cons*)cddr(expr)));
@@ -666,7 +676,7 @@ int eval_special(cons* expr, obj* valreg, vector** envreg) {
       f->type = FRAME_IF;
       f->args = (obj)ks;
     }
-    else if (strcmp(sym_name(head), "do") == 0) {
+    else if (strcmp(name, "do") == 0) {
       int len = cons_len(expr) - 1;
       *valreg = cadr(expr);
       if (len > 1) {
@@ -676,9 +686,9 @@ int eval_special(cons* expr, obj* valreg, vector** envreg) {
         f->fill = 0;
       }
     }
-    else result = 0;
+    else result = SYNTAX_NONE;
   }
-  else result = 0;
+  else result = SYNTAX_NONE;
   FORGET(1);
   return result;
 }
@@ -699,14 +709,19 @@ obj eval_loop(vector* toplevel, obj expr) {
   switch (tag(val)) {
   case LVAL_CONS:
     {
-      if (!eval_special((cons*)val, &val, &env)) {
-        int len = cons_len((cons*)val);
-        f = stack_push(env);
-        f->type = FRAME_APPLY;
-        f->args = (obj)make_vec(len + 1);
-        vec_set((vector*)f->args, 0, cdr((cons*)val));
-        f->fill = 1;
-        val = car((cons*)val);
+      switch (eval_special((cons*)val, &val, &env)) {
+      case SYNTAX_APPLY:
+        goto apply_k;
+      case SYNTAX_NONE:
+        {
+          int len = cons_len((cons*)val);
+          f = stack_push(env);
+          f->type = FRAME_APPLY;
+          f->args = (obj)make_vec(len + 1);
+          vec_set((vector*)f->args, 0, cdr((cons*)val));
+          f->fill = 1;
+          val = car((cons*)val);
+        }
       }
       goto eval;
     }

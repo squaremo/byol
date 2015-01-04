@@ -23,6 +23,9 @@ assert "./lispy '(>= 5 4 4 1)'" "true"
 assert_end
 
 echo syntax
+assert "./lispy '(quote a)'" "a" "quote symbol"
+assert "./lispy '(quote (+ 1 2 3))'" "(+ 1 2 3)" "quote list"
+assert "./lispy '(quote [1 a +])'" "[1 a +]" "quote vector"
 assert "./lispy '(do 1 2 3)'" "3" "do syntax"
 assert "./lispy '(if (< 1 2) 1 2)'" "1" "if consequent"
 assert "./lispy '(if (> 1 2) 1 2)'" "2" "if alternate"
