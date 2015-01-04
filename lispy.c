@@ -20,6 +20,21 @@ enum lval_tag { LVAL_FWD, LVAL_NUM, LVAL_SYM, LVAL_CONS,
                 LVAL_NIL, LVAL_VEC, LVAL_FUNC, LVAL_PRIM,
                 LVAL_STR, LVAL_ERR };
 
+char* lval_tag_name(enum lval_tag t) {
+  switch (t) {
+  case LVAL_FWD: return "fwd pointer";
+  case LVAL_NUM: return "number";
+  case LVAL_SYM: return "symbol";
+  case LVAL_CONS: return "cons";
+  case LVAL_NIL: return "nil";
+  case LVAL_VEC: return "vector";
+  case LVAL_FUNC: return "function";
+  case LVAL_PRIM: return "primitive";
+  case LVAL_STR: return "string";
+  case LVAL_ERR: return "error";
+  }
+}
+
 typedef intptr_t obj;
 
 typedef struct {
@@ -130,21 +145,44 @@ void gc_pop_roots(int entries) {
   assert(root_stack_ptr >= 0);
 }
 
-#define KEEP(var) gc_push_root((obj*)&(var))
-#define FORGET(num) gc_pop_roots(num)
+#define KEEP(var) do {                                          \
+    debug(printf("Pushing " #var " onto root stack\n"));        \
+    gc_push_root((obj*)&(var));                                 \
+  } while (0)
+#define FORGET(num) do {                        \
+    debug(printf("Popping %d roots\n", num));   \
+    gc_pop_roots(num);                          \
+  } while (0)
+
+void print_obj(obj);
+
+#define tospace_offset(ptr) ((long)ptr - (long)tospace)
+#define fromspace_offset(ptr) ((long)ptr - (long)fromspace)
 
 obj gc_copy(obj o) {
-  if (tag(o) == LVAL_FWD) {
-    fwd* f = (fwd*)o;
+  debug(printf("GC copy object: ")); debug(print_obj(o)); debug(puts(""));
+  if (o == (obj)NULL) return (obj)NULL;
+  else if (tag(o) == LVAL_FWD) {
+    fwd* f = (fwd*)(o - sizeof(header));
+    debug(printf("Found fwd pointer at to:%ld pointing to from:%ld\n",
+                 tospace_offset(f), fromspace_offset(f->obj)));
+    assert((intptr_t)f->obj < (intptr_t)next &&
+           (intptr_t)f->obj >= (intptr_t)fromspace);
     return f->obj;
   }
   else {
     int bytes = sizeof(header) + obj_size(o) * sizeof(intptr_t);
     fwd* from = (fwd*)((header*)o - 1);
+    obj to = (obj)(next + sizeof(header));
     memmove((void*)next, (void*)from, bytes);
-    obj to = (obj)((header*)next + 1);
+    debug(printf("Copied obj at to:%ld size %d to from:%ld\n",
+                 tospace_offset(from), bytes, fromspace_offset(next)));
     from->hdr.tag = LVAL_FWD;
+    from->hdr.size = 1;
     from->obj = to;
+    debug(printf("Left fwd pointer at to:%ld to from:%ld\n",
+                 tospace_offset(from), fromspace_offset(from->obj)));
+    debug(print_obj((obj)from + 8)); debug(putchar('\n'));
     next += bytes;
     return to;
   }
@@ -152,10 +190,29 @@ obj gc_copy(obj o) {
 
 void gc_copy_frame_stack();
 
+void gc_dump_space() {
+  header* at = (header*)fromspace;
+  printf("Dumping fromspace at %ld, extent %ld (size %ld)\n",
+         (long)fromspace, (long)next, (long)next - (long)fromspace);
+  while ((intptr_t)at < next) {
+    printf("Object at from:%ld tag %d size %ld:\n", fromspace_offset(at),
+           (int)at->tag, (long)at->size);
+    print_obj((obj)(at + 1)); putchar('\n');
+    at += (1 + at->size);
+  }
+}
+
 void gc() {
+#ifdef DEBUG
+  long oldnext = next;
+#endif
   gc_flip();
+  debug(printf("Moving objects from space at %ld to space at %ld\n",
+               (long)tospace, (long)fromspace));
   // phase one: copy over everything on the root stack and frame stack
+  debug(printf("Root stack is %d deep\n", root_stack_ptr));
   for (int i = 0; i < root_stack_ptr; i++) {
+    debug(printf("Copying root #%d\n", i));
     *root_stack[i] = gc_copy(*root_stack[i]);
   }
   gc_copy_frame_stack();
@@ -163,10 +220,11 @@ void gc() {
   // phase two: copy over things reachable from anything we copied earlier
   intptr_t todo = (intptr_t)fromspace;
   while (todo < next) {
+    debug(printf("Examining object at from:%ld\n", fromspace_offset(todo)));
     header* h = (header*)todo;
     enum lval_tag tag = h->tag;
+    debug(printf("It's a %s, size %d\n", lval_tag_name(tag), (int)h->size));
     assert(tag != LVAL_FWD);
-    int bytes = h->size;
     switch (tag) {
     case LVAL_CONS:
       {
@@ -196,8 +254,16 @@ void gc() {
       // nothing else has obj fields
       break;
     }
+    int bytes = sizeof(header) + h->size * sizeof(intptr_t);
+    debug(printf("Skipping over %d bytes\n", bytes));
     todo += bytes;
   }
+  debug(printf("GC done. Freed %ld bytes\n",
+               ((intptr_t)oldnext - (intptr_t)tospace) -
+               ((intptr_t)next - (intptr_t)fromspace)));
+  debug(printf("==== New heap ====\n"));
+  debug(gc_dump_space());
+  debug(printf("==================\n"));
 }
 
 static inline obj alloc_obj(enum lval_tag tag, int size) {
@@ -205,6 +271,7 @@ static inline obj alloc_obj(enum lval_tag tag, int size) {
   assert(tag != LVAL_FWD);
   assert(size > 0);
   int bytes = sizeof(header) + round_to_word(size);
+  debug(printf("Allocating %d bytes with %ld bytes allocated\n", bytes, (next - (long)fromspace)));
   if (next + bytes > limit) {
     gc();
     return alloc_obj(tag, size);
@@ -248,6 +315,7 @@ err* make_err(char* msg) {
 vector* make_vec(int count) {
   int size = sizeof(vector) + sizeof(obj) * count;
   vector* result = (vector*)alloc_obj(LVAL_VEC, size);
+  memset((void*)result, 0, size);
   result->count = count;
   return result;
 }
@@ -420,6 +488,7 @@ void print_obj(obj v) {
   switch (tag(v)) {
   case LVAL_FWD:
     printf("<fwd %ld>", (long)v);
+    break;
   case LVAL_NUM:
     printf("%li", *(number*)v);
     break;
@@ -519,6 +588,7 @@ int stackptr;
 void gc_copy_frame_stack() {
   for (int i = 0; i <= stackptr; i++) {
     frame* f = &stack[stackptr];
+    debug(printf("Examing frame #%d, it's a %s\n", i, frame_type(f->type)));
     f->args = gc_copy((obj)f->args);
     f->env = (vector*)gc_copy((obj)f->env);
   }
@@ -782,7 +852,7 @@ obj prim_list(vector* argv) {
 
 vector* init_toplevel() {
   int c = 10;
-
+  // assume we won't do a collection here
   vector* names = make_vec(c);
   vector* prims = make_vec(c);
 
@@ -807,11 +877,11 @@ vector* init_toplevel() {
   vec_set(names, 9, (obj)make_sym("list"));
   vec_set(prims, 9, (obj)make_prim(&prim_list));
   
-  // assume we won't do a collection here
   return env_extend(NULL, names, prims) ;
 }
 
 void eval_root(vector* toplevel, mpc_ast_t* root) {
+  KEEP(toplevel);
   int multi = 0;
   for (int i = 0; i < root->children_num; i++) {
     obj inval = read_obj(root->children[i]);
@@ -823,6 +893,7 @@ void eval_root(vector* toplevel, mpc_ast_t* root) {
       multi = 1;
     }
   }
+  FORGET(1);
 }
 
 // We can get either an expression, or program
@@ -866,8 +937,9 @@ int main(int argc, char** argv) {
   stack = malloc(sizeof(frame) * STACK_SIZE);
   stackptr = 0;
 
-  vector* toplevel = init_toplevel();
-  gc_push_root((obj*)&toplevel);
+  vector* toplevel;
+  KEEP(toplevel);
+  toplevel = init_toplevel();
 
   if (argc > 1) {
     mpc_result_t r;
@@ -910,6 +982,7 @@ int main(int argc, char** argv) {
     free(in);
   }
 
+  FORGET(1);
   mpc_cleanup(7, Number, Symbol, String, Expr, Sexp, Vector, Program);
 
   return 0;
