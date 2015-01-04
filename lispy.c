@@ -35,6 +35,8 @@ char* lval_tag_name(enum lval_tag t) {
   }
 }
 
+#define UNDEFINED ((obj)NULL)
+
 typedef intptr_t obj;
 
 typedef struct {
@@ -71,10 +73,6 @@ static inline enum lval_tag obj_tag(obj val) {
   return ((header*)val - 1)->tag;
 }
 #define tag(v) (obj_tag((obj)(v)))
-
-static inline int obj_size(obj val) {
-  return ((header*)val - 1)->size;
-}
 
 // Protect ourselves from the representation of symbols
 static inline char* sym_name(symbol* s) {
@@ -161,7 +159,7 @@ void print_obj(obj);
 
 obj gc_copy(obj o) {
   debug(printf("GC copy object: ")); debug(print_obj(o)); debug(puts(""));
-  if (o == (obj)NULL) return (obj)NULL;
+  if (o == UNDEFINED) return UNDEFINED;
   else if (tag(o) == LVAL_FWD) {
     fwd* f = (fwd*)(o - sizeof(header));
     debug(printf("Found fwd pointer at to:%ld pointing to from:%ld\n",
@@ -171,9 +169,9 @@ obj gc_copy(obj o) {
     return f->obj;
   }
   else {
-    int bytes = sizeof(header) + obj_size(o) * sizeof(intptr_t);
     fwd* from = (fwd*)((header*)o - 1);
     obj to = (obj)(next + sizeof(header));
+    int bytes = sizeof(header) + from->hdr.size * sizeof(intptr_t);
     memmove((void*)next, (void*)from, bytes);
     debug(printf("Copied obj at to:%ld size %d to from:%ld\n",
                  tospace_offset(from), bytes, fromspace_offset(next)));
@@ -422,7 +420,7 @@ obj env_lookup(vector* env, symbol* name) {
     }
     env = (vector*)vec_get(env, 0);
   }
-  return (obj)NULL;
+  return UNDEFINED;
 }
 
 // ======= reading and printing
@@ -480,11 +478,11 @@ obj read_obj(mpc_ast_t* s) {
     FORGET(1);
     return (obj)list;
   }
-  return (obj)NULL;
+  return UNDEFINED;
 }
 
 void print_obj(obj v) {
-  if (v == (obj)NULL) { printf("<undefined>"); return; }
+  if (v == UNDEFINED) { printf("<undefined>"); return; }
   switch (tag(v)) {
   case LVAL_FWD:
     printf("<fwd %ld>", (long)v);
