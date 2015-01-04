@@ -16,9 +16,17 @@
 
 // ==== values
 
-enum lval_tag { LVAL_FWD, LVAL_NUM, LVAL_SYM, LVAL_CONS,
-                LVAL_NIL, LVAL_VEC, LVAL_FUNC, LVAL_PRIM,
-                LVAL_STR, LVAL_ERR };
+enum lval_tag { LVAL_FWD = 0,
+                LVAL_NUM = 1,
+                LVAL_SYM = 2,
+                LVAL_CONS = 3,
+                LVAL_NIL = 4,
+                LVAL_VEC = 5,
+                LVAL_FUNC = 6,
+                LVAL_PRIM = 7,
+                // don't look like a fwd
+                LVAL_STR = 9,
+                LVAL_ERR = 10};
 
 char* lval_tag_name(enum lval_tag t) {
   switch (t) {
@@ -64,15 +72,16 @@ typedef struct {
 } closure;
 typedef char nil;
 
-typedef struct {
-  header hdr;
-  obj obj;
-} fwd;
-
 static inline enum lval_tag obj_tag(obj val) {
-  return ((header*)val - 1)->tag;
+  header* h = (header*)val - 1;
+  if ((h->tag & 7) == 0) return LVAL_FWD;
+  else return ((header*)h)->tag;
 }
 #define tag(v) (obj_tag((obj)(v)))
+
+static inline obj fwd_target(obj o) {
+  return *((obj*)o - 1);
+}
 
 // Protect ourselves from the representation of symbols
 static inline char* sym_name(symbol* s) {
@@ -161,26 +170,24 @@ obj gc_copy(obj o) {
   debug(printf("GC copy object: ")); debug(print_obj(o)); debug(puts(""));
   if (o == UNDEFINED) return UNDEFINED;
   else if (tag(o) == LVAL_FWD) {
-    fwd* f = (fwd*)(o - sizeof(header));
+    obj t = fwd_target(o);
     debug(printf("Found fwd pointer at to:%ld pointing to from:%ld\n",
-                 tospace_offset(f), fromspace_offset(f->obj)));
-    assert((intptr_t)f->obj < (intptr_t)next &&
-           (intptr_t)f->obj >= (intptr_t)fromspace);
-    return f->obj;
+                 tospace_offset(o), fromspace_offset(t)));
+    assert((intptr_t)t < (intptr_t)next &&
+           (intptr_t)t >= (intptr_t)fromspace);
+    return t;
   }
   else {
-    fwd* from = (fwd*)((header*)o - 1);
+    header* h = ((header*)o - 1);
     obj to = (obj)(next + sizeof(header));
-    int bytes = sizeof(header) + from->hdr.size * sizeof(intptr_t);
-    memmove((void*)next, (void*)from, bytes);
+    assert(((intptr_t)to & 7) == 0); // bottom bits are zero
+    int bytes = sizeof(header) + h->size * sizeof(intptr_t);
+    memmove((void*)next, (void*)h, bytes);
     debug(printf("Copied obj at to:%ld size %d to from:%ld\n",
-                 tospace_offset(from), bytes, fromspace_offset(next)));
-    from->hdr.tag = LVAL_FWD;
-    from->hdr.size = 1;
-    from->obj = to;
+                 tospace_offset(h), bytes, fromspace_offset(next)));
+    *(obj*)h = to;
     debug(printf("Left fwd pointer at to:%ld to from:%ld\n",
-                 tospace_offset(from), fromspace_offset(from->obj)));
-    debug(print_obj((obj)from + 8)); debug(putchar('\n'));
+                 tospace_offset(h), fromspace_offset(to)));
     next += bytes;
     return to;
   }
@@ -221,8 +228,8 @@ void gc() {
     debug(printf("Examining object at from:%ld\n", fromspace_offset(todo)));
     header* h = (header*)todo;
     enum lval_tag tag = h->tag;
-    debug(printf("It's a %s, size %d\n", lval_tag_name(tag), (int)h->size));
     assert(tag != LVAL_FWD);
+    debug(printf("It's a %s, size %d\n", lval_tag_name(tag), (int)h->size));
     switch (tag) {
     case LVAL_CONS:
       {
@@ -485,7 +492,7 @@ void print_obj(obj v) {
   if (v == UNDEFINED) { printf("<undefined>"); return; }
   switch (tag(v)) {
   case LVAL_FWD:
-    printf("<fwd %ld>", (long)v);
+    printf("<fwd %ld>", (long)fwd_target(v));
     break;
   case LVAL_NUM:
     printf("%li", *(number*)v);
