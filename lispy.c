@@ -16,20 +16,20 @@
 
 // ==== values
 
-enum lval_tag { LVAL_FWD = 0,
-                LVAL_NUM = 1,
-                LVAL_SYM = 2,
-                LVAL_CONS = 3,
-                LVAL_NIL = 4,
-                LVAL_VEC = 5,
-                LVAL_FUNC = 6,
-                LVAL_PRIM = 7,
-                // don't look like a fwd
-                LVAL_STR = 9,
-                LVAL_ERR = 10,
-                LVAL_IMM_SYM = 11 };
+enum lval_type { LVAL_FWD = 0,
+                 LVAL_NUM = 1,
+                 LVAL_SYM = 2,
+                 LVAL_CONS = 3,
+                 LVAL_NIL = 4,
+                 LVAL_VEC = 5,
+                 LVAL_FUNC = 6,
+                 LVAL_PRIM = 7,
+                 // don't look like a fwd
+                 LVAL_STR = 9,
+                 LVAL_ERR = 10,
+                 LVAL_IMM_SYM = 11 };
 
-char* lval_tag_name(enum lval_tag t) {
+char* lval_type_name(enum lval_type t) {
   switch (t) {
   case LVAL_FWD: return "fwd pointer";
   case LVAL_NUM: return "number";
@@ -53,7 +53,7 @@ char* lval_tag_name(enum lval_tag t) {
 typedef intptr_t obj;
 
 typedef struct {
-  uint64_t tag:8;
+  uint64_t type:8;
   uint64_t size:56;
 } header;
 
@@ -77,24 +77,24 @@ typedef struct {
 } closure;
 typedef char nil;
 
-static inline enum lval_tag obj_tag(obj val) {
+static inline enum lval_type obj_type(obj val) {
   // integer: the lowest bit is 1
   if (((intptr_t)val & 1) == 1) return LVAL_NUM;
   // inline symbol: the lowest three bits are 010
   if (((intptr_t)val & 7) == TAG_IMM_SYM) return LVAL_IMM_SYM;
   // Otherwise look at the header
   header* h = (header*)val - 1;
-  if ((h->tag & 7) == 0) return LVAL_FWD;
-  else return ((header*)h)->tag;
+  if ((h->type & 7) == 0) return LVAL_FWD;
+  else return ((header*)h)->type;
 }
-#define tag(v) (obj_tag((obj)(v)))
+#define type(v) (obj_type((obj)(v)))
 
 static inline int lval_is_immediate(obj o) {
   return ! (((intptr_t)o & 7) == 0);
 }
 
 static inline int lval_is_sym(obj o) {
-  return tag(o) == LVAL_IMM_SYM || tag(o) == LVAL_IMM_SYM;
+  return type(o) == LVAL_IMM_SYM || type(o) == LVAL_IMM_SYM;
 }
 
 static inline obj fwd_target(obj o) {
@@ -106,7 +106,7 @@ static inline number num_value(obj o) {
 }
 
 // Protect ourselves from the representation of symbols
-#define sym_name(s) ((tag(s) == LVAL_IMM_SYM) ? \
+#define sym_name(s) ((type(s) == LVAL_IMM_SYM) ? \
                      ((char*)(&(s)) + 1) : (char*)(s))
 
 static inline int sym_cmp(symbol a, symbol b) {
@@ -190,7 +190,7 @@ obj gc_copy(obj o) {
   debug(printf("GC copy object: ")); debug(print_obj(o)); debug(puts(""));
   if (o == UNDEFINED) return UNDEFINED;
   else if (lval_is_immediate(o)) return o;
-  else if (tag(o) == LVAL_FWD) {
+  else if (type(o) == LVAL_FWD) {
     obj t = fwd_target(o);
     debug(printf("Found fwd pointer at to:%ld pointing to from:%ld\n",
                  tospace_offset(o), fromspace_offset(t)));
@@ -221,8 +221,8 @@ void gc_dump_space() {
   printf("Dumping fromspace at %ld, extent %ld (size %ld)\n",
          (long)fromspace, (long)next, (long)next - (long)fromspace);
   while ((intptr_t)at < next) {
-    printf("Object at from:%ld tag %d size %ld:\n", fromspace_offset(at),
-           (int)at->tag, (long)at->size);
+    printf("Object at from:%ld type %d size %ld:\n", fromspace_offset(at),
+           (int)at->type, (long)at->size);
     print_obj((obj)(at + 1)); putchar('\n');
     at += (1 + at->size);
   }
@@ -248,10 +248,10 @@ void gc() {
   while (todo < next) {
     debug(printf("Examining object at from:%ld\n", fromspace_offset(todo)));
     header* h = (header*)todo;
-    enum lval_tag tag = h->tag;
-    assert(tag != LVAL_FWD);
-    debug(printf("It's a %s, size %d\n", lval_tag_name(tag), (int)h->size));
-    switch (tag) {
+    enum lval_type type = h->type;
+    assert(type != LVAL_FWD);
+    debug(printf("It's a %s, size %d\n", lval_type_name(type), (int)h->size));
+    switch (type) {
     case LVAL_CONS:
       {
         cons* c = (cons*)(h + 1);
@@ -292,18 +292,18 @@ void gc() {
   debug(printf("==================\n"));
 }
 
-static inline obj alloc_obj(enum lval_tag tag, int size) {
+static inline obj alloc_obj(enum lval_type type, int size) {
   // sizeof(header) will be padded anyway, so the sum will be rounded
-  assert(tag != LVAL_FWD);
+  assert(type != LVAL_FWD);
   assert(size > 0);
   int bytes = sizeof(header) + round_to_word(size);
   debug(printf("Allocating %d bytes with %ld bytes allocated\n", bytes, (next - (long)fromspace)));
   if (next + bytes > limit) {
     gc();
-    return alloc_obj(tag, size);
+    return alloc_obj(type, size);
   }
   header* h = (header*)next;
-  h->tag = tag;
+  h->type = type;
   // NB size does not include header
   h->size = round_to_word(size) / sizeof(intptr_t);
   next += bytes;
@@ -382,14 +382,14 @@ closure* make_clos(vector* formals, vector* env, cons* body) {
 }
 
 static inline obj car(cons* s) {
-  if (tag(s) != LVAL_CONS) {
+  if (type(s) != LVAL_CONS) {
     return (obj)make_err("Tried to get car of non-list");
   }
   return s->car;
 }
 
 static inline obj cdr(cons* s) {
-  if (tag(s) != LVAL_CONS) {
+  if (type(s) != LVAL_CONS) {
     return (obj)make_err("Tried to get cdr of non-list");
   }
   else {
@@ -399,7 +399,7 @@ static inline obj cdr(cons* s) {
 
 static inline obj cddr(cons* s) {
   cons* cdrval = (cons*)cdr(s);
-  if (tag(cdrval) != LVAL_CONS) {
+  if (type(cdrval) != LVAL_CONS) {
     return (obj)make_err("Tried to get cddr of not long enough list");
   }
   else {
@@ -409,7 +409,7 @@ static inline obj cddr(cons* s) {
 
 static inline obj cadr(cons* s) {
   cons* cdrval = (cons*)cdr(s);
-  if (tag(cdrval) != LVAL_CONS) {
+  if (type(cdrval) != LVAL_CONS) {
     return (obj)make_err("Tried to get cadr of not long enough list");
   }
   else {
@@ -419,7 +419,7 @@ static inline obj cadr(cons* s) {
 
 static inline int cons_len(cons* s) {
   int l = 0;
-  while (tag(s) == LVAL_CONS) {
+  while (type(s) == LVAL_CONS) {
     l++;
     s = (cons*)s->cdr;
   }
@@ -515,7 +515,7 @@ obj read_obj(mpc_ast_t* s) {
 
 void print_obj(obj v) {
   if (v == UNDEFINED) { printf("<undefined>"); return; }
-  switch (tag(v)) {
+  switch (type(v)) {
   case LVAL_FWD:
     printf("<fwd %ld>", (long)fwd_target(v));
     break;
@@ -551,13 +551,13 @@ void print_obj(obj v) {
     {
       putchar('(');
       int space = 0;
-      while (tag(v) == LVAL_CONS) {
+      while (type(v) == LVAL_CONS) {
         if (space) putchar(' ');
         space = 1;
         print_obj(car((cons*)v));
         v = cdr((cons*)v);
       }
-      if (tag(v) != LVAL_NIL) {
+      if (type(v) != LVAL_NIL) {
         puts(".");
         print_obj(v);
       }
@@ -706,7 +706,7 @@ obj eval_loop(vector* toplevel, obj expr) {
   debug(printf("eval: ")); debug(print_obj(val)); debug(putchar('\n'));
   debug(printf("in env: ")); debug(print_env(env)); debug(putchar('\n'));
 
-  switch (tag(val)) {
+  switch (type(val)) {
   case LVAL_CONS:
     {
       switch (eval_special((cons*)val, &val, &env)) {
@@ -755,14 +755,14 @@ obj eval_loop(vector* toplevel, obj expr) {
   case FRAME_APPLY: {
     vec_set((vector*)f->args, f->fill++, val);
     cons* todo = (cons*)vec_get((vector*)f->args, 0);
-    if (tag(todo) == LVAL_NIL) { // no more arguments to eval, enter func
+    if (type(todo) == LVAL_NIL) { // no more arguments to eval, enter func
       obj head = vec_get((vector*)f->args, 1);
-      if (tag(head) == LVAL_FUNC) {
+      if (type(head) == LVAL_FUNC) {
         closure* func = (closure*)head;
         vector* newenv = (vector*)f->args;
         vec_set(newenv, 0, (obj)func->env);
         vec_set(newenv, 1, (obj)func->formals);
-        if (tag(cdr(func->body)) == LVAL_CONS) {
+        if (type(cdr(func->body)) == LVAL_CONS) {
           val = car(func->body);
           // NB reuse stack frame
           f->type = FRAME_PROGN;
@@ -778,7 +778,7 @@ obj eval_loop(vector* toplevel, obj expr) {
         env = newenv;
         goto eval;
       }
-      else if (tag(head) == LVAL_PRIM) {
+      else if (type(head) == LVAL_PRIM) {
         prim_fun func = *(prim*)head;
         // don't care about formals or parent env
         stack_pop(&env);
@@ -816,7 +816,7 @@ obj eval_loop(vector* toplevel, obj expr) {
     goto eval;
 
   case FRAME_PROGN:
-    if (tag(f->args) == LVAL_NIL) {
+    if (type(f->args) == LVAL_NIL) {
       stack_pop(&env);
       goto apply_k;
     }
@@ -838,13 +838,13 @@ obj eval_loop(vector* toplevel, obj expr) {
       return (obj)make_num(zero);                                       \
     }                                                                   \
     obj arg = vec_get(argv, 2);                                         \
-    if (! tag(arg) == LVAL_NUM) {                                       \
+    if (! type(arg) == LVAL_NUM) {                                       \
       return (obj)make_err("Arguments to " #sname " must be numbers");  \
     }                                                                   \
     number result = num_value(arg);                                     \
     for (int i = 3; i < vec_count(argv); i++) {                         \
       arg = vec_get(argv, i);                                           \
-      if (tag(arg) != LVAL_NUM) {                                       \
+      if (type(arg) != LVAL_NUM) {                                       \
         return (obj)make_err("Arguments to " #sname " must be numbers"); \
       }                                                                 \
       result = result op num_value(arg);                                \
@@ -862,13 +862,13 @@ NUM_OP(prim_div, /, 1, /);
       return (obj)make_sym("true");                                     \
     }                                                                   \
     obj arg = vec_get(argv, 2);                                         \
-    if (tag(arg) != LVAL_NUM) {                                         \
+    if (type(arg) != LVAL_NUM) {                                         \
       return (obj)make_err("Arguments to " #sname " must be numbers");  \
     }                                                                   \
     number a = num_value(arg);                                          \
     for (int i = 3; i < vec_count(argv); i++) {                         \
       arg = vec_get(argv, i);                                           \
-      if (tag(arg) != LVAL_NUM) {                                       \
+      if (type(arg) != LVAL_NUM) {                                       \
         return (obj)make_err("Arguments to " #sname " must be numbers"); \
       }                                                                 \
       number b = num_value(arg);                                        \
