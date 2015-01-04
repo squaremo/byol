@@ -26,7 +26,7 @@ enum lval_tag { LVAL_FWD = 0,
                 LVAL_PRIM = 7,
                 // don't look like a fwd
                 LVAL_STR = 9,
-                LVAL_ERR = 10};
+                LVAL_ERR = 10 };
 
 char* lval_tag_name(enum lval_tag t) {
   switch (t) {
@@ -52,7 +52,7 @@ typedef struct {
   uint64_t size:56;
 } header;
 
-typedef long number;
+typedef intptr_t number;
 typedef char symbol;
 typedef char string;
 typedef char err;
@@ -73,6 +73,9 @@ typedef struct {
 typedef char nil;
 
 static inline enum lval_tag obj_tag(obj val) {
+  // integer: the lowest bit is 1
+  if (((intptr_t)val & 1) == 1) return LVAL_NUM;
+  // Otherwise look at the header
   header* h = (header*)val - 1;
   if ((h->tag & 7) == 0) return LVAL_FWD;
   else return ((header*)h)->tag;
@@ -81,6 +84,10 @@ static inline enum lval_tag obj_tag(obj val) {
 
 static inline obj fwd_target(obj o) {
   return *((obj*)o - 1);
+}
+
+static inline number num_value(obj o) {
+  return (number)o >> 1;
 }
 
 // Protect ourselves from the representation of symbols
@@ -169,6 +176,7 @@ void print_obj(obj);
 obj gc_copy(obj o) {
   debug(printf("GC copy object: ")); debug(print_obj(o)); debug(puts(""));
   if (o == UNDEFINED) return UNDEFINED;
+  else if (tag(o) == LVAL_NUM) return o;
   else if (tag(o) == LVAL_FWD) {
     obj t = fwd_target(o);
     debug(printf("Found fwd pointer at to:%ld pointing to from:%ld\n",
@@ -291,10 +299,8 @@ static inline obj alloc_obj(enum lval_tag tag, int size) {
 
 // === constructing values
 
-number* make_num(long value) {
-  number* result = (number*)alloc_obj(LVAL_NUM, sizeof(number));
-  *result = value;
-  return result;
+number make_num(long value) {
+  return (intptr_t)value << 1 | 1;
 }
 
 symbol* make_sym(char* characters) {
@@ -432,7 +438,7 @@ obj env_lookup(vector* env, symbol* name) {
 
 // ======= reading and printing
 
-number* read_number(mpc_ast_t* n) {
+number read_number(mpc_ast_t* n) {
   errno = 0;
   long x = strtol(n->contents, NULL, 10);
   // ignore for now
@@ -495,7 +501,7 @@ void print_obj(obj v) {
     printf("<fwd %ld>", (long)fwd_target(v));
     break;
   case LVAL_NUM:
-    printf("%li", *(number*)v);
+    printf("%li", num_value(v));
     break;
   case LVAL_SYM:
     printf("%s", sym_name((symbol*)v));
@@ -799,13 +805,13 @@ obj eval_loop(vector* toplevel, obj expr) {
     if (! tag(arg) == LVAL_NUM) {                                       \
       return (obj)make_err("Arguments to " #sname " must be numbers");  \
     }                                                                   \
-    long result = *(number*)arg;                                        \
+    number result = num_value(arg);                                     \
     for (int i = 3; i < vec_count(argv); i++) {                         \
       arg = vec_get(argv, i);                                           \
       if (tag(arg) != LVAL_NUM) {                                       \
         return (obj)make_err("Arguments to " #sname " must be numbers"); \
       }                                                                 \
-      result = result op *(number*)arg;                                 \
+      result = result op num_value(arg);                                \
     }                                                                   \
     return (obj)make_num(result);                                       \
   }                                                                     \
@@ -823,13 +829,13 @@ NUM_OP(prim_div, /, 1, /);
     if (tag(arg) != LVAL_NUM) {                                         \
       return (obj)make_err("Arguments to " #sname " must be numbers");  \
     }                                                                   \
-    long a = *(number*)arg;                                             \
+    number a = num_value(arg);                                          \
     for (int i = 3; i < vec_count(argv); i++) {                         \
       arg = vec_get(argv, i);                                           \
       if (tag(arg) != LVAL_NUM) {                                       \
         return (obj)make_err("Arguments to " #sname " must be numbers"); \
       }                                                                 \
-      long b = *(number*)arg;                                           \
+      number b = num_value(arg);                                        \
       if (!(a comp b)) {                                                \
         return (obj)make_sym("false");                                  \
       }                                                                 \
