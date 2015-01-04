@@ -15,6 +15,11 @@ assert "./lispy '(+ 1 4)'" "5"
 assert "./lispy '(- 4 1)'" "3"
 assert "./lispy '(* 6 4)'" "24"
 assert "./lispy '(/ 10 3)'" "3"
+assert "./lispy '(< 0 1 2 3)'" "true"
+assert "./lispy '(< 0 1 2 1)'" "false"
+assert "./lispy '(> 0)'" "true"
+assert "./lispy '(> 5 4 3)'" "true"
+assert "./lispy '(>= 5 4 4 1)'" "true"
 assert_end
 
 echo syntax
