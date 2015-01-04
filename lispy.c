@@ -26,12 +26,14 @@ enum lval_tag { LVAL_FWD = 0,
                 LVAL_PRIM = 7,
                 // don't look like a fwd
                 LVAL_STR = 9,
-                LVAL_ERR = 10 };
+                LVAL_ERR = 10,
+                LVAL_IMM_SYM = 11 };
 
 char* lval_tag_name(enum lval_tag t) {
   switch (t) {
   case LVAL_FWD: return "fwd pointer";
   case LVAL_NUM: return "number";
+  case LVAL_IMM_SYM: // fall through
   case LVAL_SYM: return "symbol";
   case LVAL_CONS: return "cons";
   case LVAL_NIL: return "nil";
@@ -45,6 +47,9 @@ char* lval_tag_name(enum lval_tag t) {
 
 #define UNDEFINED ((obj)NULL)
 
+#define TAG_MASK 0xffffffffffffff00
+#define TAG_IMM_SYM 2
+
 typedef intptr_t obj;
 
 typedef struct {
@@ -53,7 +58,7 @@ typedef struct {
 } header;
 
 typedef intptr_t number;
-typedef char symbol;
+typedef intptr_t symbol;
 typedef char string;
 typedef char err;
 typedef struct {
@@ -75,12 +80,22 @@ typedef char nil;
 static inline enum lval_tag obj_tag(obj val) {
   // integer: the lowest bit is 1
   if (((intptr_t)val & 1) == 1) return LVAL_NUM;
+  // inline symbol: the lowest three bits are 010
+  if (((intptr_t)val & 7) == TAG_IMM_SYM) return LVAL_IMM_SYM;
   // Otherwise look at the header
   header* h = (header*)val - 1;
   if ((h->tag & 7) == 0) return LVAL_FWD;
   else return ((header*)h)->tag;
 }
 #define tag(v) (obj_tag((obj)(v)))
+
+static inline int lval_is_immediate(obj o) {
+  return ! (((intptr_t)o & 7) == 0);
+}
+
+static inline int lval_is_sym(obj o) {
+  return tag(o) == LVAL_IMM_SYM || tag(o) == LVAL_IMM_SYM;
+}
 
 static inline obj fwd_target(obj o) {
   return *((obj*)o - 1);
@@ -91,11 +106,10 @@ static inline number num_value(obj o) {
 }
 
 // Protect ourselves from the representation of symbols
-static inline char* sym_name(symbol* s) {
-  return (char*)s;
-}
+#define sym_name(s) ((tag(s) == LVAL_IMM_SYM) ? \
+                     ((char*)(&(s)) + 1) : (char*)(s))
 
-static inline int sym_cmp(symbol* a, symbol* b) {
+static inline int sym_cmp(symbol a, symbol b) {
   return strcmp(sym_name(a), sym_name(b));
 }
 
@@ -116,8 +130,7 @@ static inline int round_to_word(int n) {
 }
 
 static inline int lval_truthy(obj v) {
-  return !(tag(v) == LVAL_SYM &&
-           strcmp(sym_name((symbol*)v), "false") == 0);
+  return !(lval_is_sym(v) && strcmp(sym_name(v), "false") == 0);
 }
 
 // garbage collection
@@ -176,7 +189,7 @@ void print_obj(obj);
 obj gc_copy(obj o) {
   debug(printf("GC copy object: ")); debug(print_obj(o)); debug(puts(""));
   if (o == UNDEFINED) return UNDEFINED;
-  else if (tag(o) == LVAL_NUM) return o;
+  else if (lval_is_immediate(o)) return o;
   else if (tag(o) == LVAL_FWD) {
     obj t = fwd_target(o);
     debug(printf("Found fwd pointer at to:%ld pointing to from:%ld\n",
@@ -303,11 +316,17 @@ number make_num(long value) {
   return (intptr_t)value << 1 | 1;
 }
 
-symbol* make_sym(char* characters) {
+symbol make_sym(char* characters) {
   int size = strlen(characters) + 1;
-  symbol* result = (symbol*)alloc_obj(LVAL_SYM, size);
-  strcpy(result, characters);
-  return result;
+  if (size <= sizeof(intptr_t) - 1) {
+    // encode the symbol in a char array
+    return (symbol) ((*((intptr_t*)(characters - 1)) & TAG_MASK) | TAG_IMM_SYM);
+  }
+  else {
+    symbol result = (symbol)alloc_obj(LVAL_SYM, size);
+    strcpy((char*)result, characters);
+    return result;
+  }
 }
 
 string* make_str(char* characters) {
@@ -422,12 +441,12 @@ vector* env_extend(vector* parent, vector* names, vector* vals) {
   return e;
 }
 
-obj env_lookup(vector* env, symbol* name) {
+obj env_lookup(vector* env, symbol name) {
   while (env != NULL) {
     vector* names = (vector*)vec_get(env, 1);
     int count = vec_count(names);
     for (int i = 0; i < count; i++) {
-      if (sym_cmp((symbol*)vec_get(names, i), name) == 0) {
+      if (sym_cmp((symbol)vec_get(names, i), name) == 0) {
         return vec_get(env, i + 2);
       }
     }
@@ -503,8 +522,9 @@ void print_obj(obj v) {
   case LVAL_NUM:
     printf("%li", num_value(v));
     break;
+  case LVAL_IMM_SYM:
   case LVAL_SYM:
-    printf("%s", sym_name((symbol*)v));
+    printf("%s", sym_name(v));
     break;
   case LVAL_STR:
     printf("%s", (char*)v);
@@ -628,8 +648,8 @@ int eval_special(cons* expr, obj* valreg, vector** envreg) {
   KEEP(expr);
   int result = 1;
   obj head = car(expr);
-  if (tag(head) == LVAL_SYM) {
-    if (strcmp(sym_name((symbol*)head), "lambda") == 0) {
+  if (lval_is_sym(head)) {
+    if (strcmp(sym_name(head), "lambda") == 0) {
       vector* args = (vector*)cadr(expr);
       cons* body = (cons*)cddr(expr);
       debug(puts("Making lambda"));
@@ -637,7 +657,7 @@ int eval_special(cons* expr, obj* valreg, vector** envreg) {
       debug(print_obj((obj)body)); debug(putchar('\n'));
       *valreg = (obj)make_clos(args, *envreg, body);
     }
-    else if (strcmp(sym_name((symbol*)head), "if") == 0) {
+    else if (strcmp(sym_name(head), "if") == 0) {
       vector* ks = make_vec(2);
       vec_set(ks, 0, car((cons*)cddr(expr)));
       vec_set(ks, 1, cadr((cons*)cddr(expr)));
@@ -646,7 +666,7 @@ int eval_special(cons* expr, obj* valreg, vector** envreg) {
       f->type = FRAME_IF;
       f->args = (obj)ks;
     }
-    else if (strcmp(sym_name((symbol*)head), "do") == 0) {
+    else if (strcmp(sym_name(head), "do") == 0) {
       int len = cons_len(expr) - 1;
       *valreg = cadr(expr);
       if (len > 1) {
@@ -700,8 +720,9 @@ obj eval_loop(vector* toplevel, obj expr) {
       val = vec_get((vector*)f->args, 0);
     }
     goto eval;
+  case LVAL_IMM_SYM: // fall through
   case LVAL_SYM:
-    val = env_lookup(env, (symbol*)val);
+    val = env_lookup(env, (symbol)val);
     goto apply_k;
   default:
     goto apply_k;
