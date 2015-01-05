@@ -48,7 +48,11 @@ char* lval_type_name(enum lval_type t) {
 #define UNDEFINED ((obj)NULL)
 
 #define TAG_MASK 0xffffffffffffff00
-#define TAG_IMM_SYM 2
+#define PTR_MASK 0xfffffffffffffff8
+// 1100
+#define TAG_IMM_SYM 12
+// 010
+#define TAG_PRIM 2
 
 typedef intptr_t obj;
 
@@ -65,7 +69,11 @@ typedef struct {
   int count;
 } vector;
 typedef obj (*prim_fun)(vector*);
-typedef prim_fun prim;
+struct prim_s {
+  char* name;
+  prim_fun func;
+};
+typedef intptr_t prim;
 typedef struct {
   obj car;
   obj cdr;
@@ -80,8 +88,10 @@ typedef char nil;
 static inline enum lval_type obj_type(obj val) {
   // integer: the lowest bit is 1
   if (((intptr_t)val & 1) == 1) return LVAL_NUM;
-  // inline symbol: the lowest three bits are 010
-  if (((intptr_t)val & 7) == TAG_IMM_SYM) return LVAL_IMM_SYM;
+  // pointer to primitive struct: last three bits are 010
+  if (((intptr_t)val & 7) == TAG_PRIM) return LVAL_PRIM;
+  // inline symbol: the last byte is 0000 1100
+  if (((intptr_t)val & 255) == TAG_IMM_SYM) return LVAL_IMM_SYM;
   // Otherwise look at the header
   header* h = (header*)val - 1;
   if ((h->type & 7) == 0) return LVAL_FWD;
@@ -103,6 +113,10 @@ static inline obj fwd_target(obj o) {
 
 static inline number num_value(obj o) {
   return (number)o >> 1;
+}
+
+static inline struct prim_s* prim_value(obj o) {
+  return (struct prim_s*)(o & PTR_MASK);
 }
 
 // Protect ourselves from the representation of symbols
@@ -365,10 +379,8 @@ nil* make_nil() {
   return result;
 }
 
-prim* make_prim(prim_fun f) {
-  prim* result = (prim*)alloc_obj(LVAL_PRIM, sizeof(prim));
-  *result = f;
-  return result;
+prim make_prim(struct prim_s* p) {
+  return (intptr_t)p | TAG_PRIM;
 }
 
 closure* make_clos(vector* formals, vector* env, cons* body) {
@@ -533,8 +545,10 @@ void print_obj(obj v) {
     printf("<error %s>", (char*)v);
     break;
   case LVAL_FUNC:
-  case LVAL_PRIM:
     printf("<function>");
+    break;
+  case LVAL_PRIM:
+    printf("<primitive %s>", prim_value(v)->name);
     break;
   case LVAL_VEC:
     putchar('[');
@@ -779,7 +793,7 @@ obj eval_loop(vector* toplevel, obj expr) {
         goto eval;
       }
       else if (type(head) == LVAL_PRIM) {
-        prim_fun func = *(prim*)head;
+        prim_fun func = prim_value(head)->func;
         // don't care about formals or parent env
         stack_pop(&env);
         val = func((vector*)f->args);
@@ -897,34 +911,34 @@ obj prim_list(vector* argv) {
   return res;
 }
 
+#define PRIM(name, func) (struct prim_s){name, &func};
+
 vector* init_toplevel() {
   int c = 10;
+
+  struct prim_s* prims = malloc(c * sizeof(struct prim_s));
+  prims[0] = PRIM("+", prim_plus);
+  prims[1] = PRIM("-", prim_minus);
+  prims[2] = PRIM("*", prim_mult);
+  prims[3] = PRIM("/", prim_div);
+  prims[4] = PRIM("<", prim_lt);
+  prims[5] = PRIM("<=", prim_lte);
+  prims[6] = PRIM(">", prim_gt);
+  prims[7] = PRIM(">=", prim_gte);
+  prims[8] = PRIM("=", prim_numeq);
+  prims[9] = PRIM("list", prim_list);
+
   // assume we won't do a collection here
   vector* names = make_vec(c);
-  vector* prims = make_vec(c);
+  vector* env = make_vec(c + 2);
+  vec_set(env, 1, (obj)names);
 
-  vec_set(names, 0, (obj)make_sym("+"));
-  vec_set(prims, 0, (obj)make_prim(&prim_plus));
-  vec_set(names, 1, (obj)make_sym("-"));
-  vec_set(prims, 1, (obj)make_prim(&prim_minus));
-  vec_set(names, 2, (obj)make_sym("*"));
-  vec_set(prims, 2, (obj)make_prim(&prim_mult));
-  vec_set(names, 3, (obj)make_sym("/"));
-  vec_set(prims, 3, (obj)make_prim(&prim_div));
-  vec_set(names, 4, (obj)make_sym("<"));
-  vec_set(prims, 4, (obj)make_prim(&prim_lt));
-  vec_set(names, 5, (obj)make_sym("<="));
-  vec_set(prims, 5, (obj)make_prim(&prim_lte));
-  vec_set(names, 6, (obj)make_sym(">"));
-  vec_set(prims, 6, (obj)make_prim(&prim_gt));
-  vec_set(names, 7, (obj)make_sym(">="));
-  vec_set(prims, 7, (obj)make_prim(&prim_gte));
-  vec_set(names, 8, (obj)make_sym("="));
-  vec_set(prims, 8, (obj)make_prim(&prim_numeq));
-  vec_set(names, 9, (obj)make_sym("list"));
-  vec_set(prims, 9, (obj)make_prim(&prim_list));
+  for (int i=0; i < c; i++) {
+    vec_set(names, i, (obj)make_sym(prims[i].name));
+    vec_set(env, i + 2, (obj)make_prim(&prims[i]));
+  }
   
-  return env_extend(NULL, names, prims) ;
+  return env;
 }
 
 void eval_root(vector* toplevel, mpc_ast_t* root) {
