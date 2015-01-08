@@ -606,7 +606,7 @@ typedef struct frame {
   enum frame_type type;
   vector* env;
   obj args;
-  int fill;
+  int index;
 } frame;
 
 static inline char* frame_type(enum frame_type t) {
@@ -697,7 +697,7 @@ int eval_special(cons* expr, obj* valreg, vector** envreg) {
         frame* f = stack_push(*envreg);
         f->type = FRAME_PROGN;
         f->args = cddr(expr);
-        f->fill = 0;
+        f->index = 0;
       }
     }
     else result = SYNTAX_NONE;
@@ -733,7 +733,7 @@ obj eval_loop(vector* toplevel, obj expr) {
           f->type = FRAME_APPLY;
           f->args = (obj)make_vec(len + 1);
           vec_set((vector*)f->args, 0, cdr((cons*)val));
-          f->fill = 1;
+          f->index = 1;
           val = car((cons*)val);
         }
       }
@@ -745,7 +745,7 @@ obj eval_loop(vector* toplevel, obj expr) {
       f = stack_push(env);
       f->type = FRAME_VEC;
       f->args = val;
-      f->fill = 0;
+      f->index = 0;
       val = vec_get((vector*)f->args, 0);
     }
     goto eval;
@@ -767,7 +767,7 @@ obj eval_loop(vector* toplevel, obj expr) {
   switch (f->type) {
 
   case FRAME_APPLY: {
-    vec_set((vector*)f->args, f->fill++, val);
+    vec_set((vector*)f->args, f->index++, val);
     cons* todo = (cons*)vec_get((vector*)f->args, 0);
     if (type(todo) == LVAL_NIL) { // no more arguments to eval, enter func
       obj head = vec_get((vector*)f->args, 1);
@@ -781,7 +781,7 @@ obj eval_loop(vector* toplevel, obj expr) {
           // NB reuse stack frame
           f->type = FRAME_PROGN;
           f->args = cdr(func->body);
-          f->fill = 0;
+          f->index = 0;
           f->env = env;
         }
         else {
@@ -808,9 +808,9 @@ obj eval_loop(vector* toplevel, obj expr) {
   }
 
   case FRAME_VEC:
-    vec_set((vector*)f->args, f->fill++, val);
-    if (f->fill < vec_count((vector*)f->args)) {
-      val = vec_get((vector*)f->args, f->fill);
+    vec_set((vector*)f->args, f->index++, val);
+    if (f->index < vec_count((vector*)f->args)) {
+      val = vec_get((vector*)f->args, f->index);
       goto eval;
     }
     else {
