@@ -150,7 +150,7 @@ static inline int lval_truthy(obj v) {
 // garbage collection
 
 #define STACK_SIZE 2048
-#define HEAP_SIZE 2048
+#define HEAP_SIZE 2048000
 
 obj** root_stack;
 int root_stack_ptr = 0;
@@ -600,7 +600,10 @@ void print_env(vector* env) {
 
 // === eeeeeeval
 
-enum frame_type { FRAME_EMPTY, FRAME_APPLY, FRAME_IF, FRAME_PROGN, FRAME_VEC };
+enum frame_type { FRAME_EMPTY, FRAME_ARG,
+                  FRAME_APPLY, FRAME_IF,
+                  FRAME_PROGN, FRAME_VEC,
+                  FRAME_LETREC };
 
 typedef struct frame {
   enum frame_type type;
@@ -616,6 +619,8 @@ static inline char* frame_type(enum frame_type t) {
   case FRAME_IF: return "if";
   case FRAME_PROGN: return "do";
   case FRAME_VEC: return "vector";
+  case FRAME_ARG: return "arg";
+  case FRAME_LETREC: return "letrec";
   }
 }
 
@@ -681,6 +686,29 @@ int eval_special(cons* expr, obj* valreg, vector** envreg) {
       *valreg = (obj)make_clos(args, *envreg, body);
       result = SYNTAX_APPLY;
     }
+    else if (strcmp(name, "letrec") == 0) {
+      vector* args = (vector*)cadr(expr);
+      assert(type(args) == LVAL_VEC);
+      int c = vec_count(args);
+      assert(c % 2 == 0);
+      c /= 2;
+      KEEP(args);
+      *valreg = (obj)make_vec(c + 2);
+      vec_set((vector*)*valreg, 0, (obj)*envreg);
+      vector* names = make_vec(c);
+      FORGET(1);
+      vec_set((vector*)*valreg, 1, (obj)names);
+      for (int i = 0; i < c; i++) {
+        obj s = vec_get(args, i * 2);
+        assert(lval_is_sym(s));
+        vec_set(names, i, s);
+      }
+      frame* f = stack_push(*envreg);
+      f->args = cdr(expr);
+      f->type = FRAME_LETREC;
+      f->index = 2;
+      return SYNTAX_APPLY;
+    }
     else if (strcmp(name, "if") == 0) {
       vector* ks = make_vec(2);
       vec_set(ks, 0, car((cons*)cddr(expr)));
@@ -731,8 +759,12 @@ obj eval_loop(vector* toplevel, obj expr) {
           int len = cons_len((cons*)val);
           f = stack_push(env);
           f->type = FRAME_APPLY;
+          f->args = cdr((cons*)val);
+          f->index = 1;
+          // and at least evaluate the head
+          f = stack_push(env);
+          f->type = FRAME_ARG;
           f->args = (obj)make_vec(len + 1);
-          vec_set((vector*)f->args, 0, cdr((cons*)val));
           f->index = 1;
           val = car((cons*)val);
         }
@@ -766,14 +798,22 @@ obj eval_loop(vector* toplevel, obj expr) {
 
   switch (f->type) {
 
+  case FRAME_ARG: {
+    vector* args = (vector*)f->args;
+    vec_set(args, f->index, val);
+    val = f->args;
+    stack_pop(&env);
+    goto apply_k;
+  }
+
   case FRAME_APPLY: {
-    vec_set((vector*)f->args, f->index++, val);
-    cons* todo = (cons*)vec_get((vector*)f->args, 0);
-    if (type(todo) == LVAL_NIL) { // no more arguments to eval, enter func
-      obj head = vec_get((vector*)f->args, 1);
+    vector* newenv = (vector*)val;
+    cons* exprs = (cons*)f->args;
+    
+    if (type(exprs) == LVAL_NIL) {
+      obj head = vec_get(newenv, 1);
       if (type(head) == LVAL_FUNC) {
         closure* func = (closure*)head;
-        vector* newenv = (vector*)f->args;
         vec_set(newenv, 0, (obj)func->env);
         vec_set(newenv, 1, (obj)func->formals);
         if (type(cdr(func->body)) == LVAL_CONS) {
@@ -796,14 +836,44 @@ obj eval_loop(vector* toplevel, obj expr) {
         prim_fun func = prim_value(head)->func;
         // don't care about formals or parent env
         stack_pop(&env);
-        val = func((vector*)f->args);
+        val = func(newenv);
         goto apply_k;
       }
     }
-    else {
-      vec_set((vector*)f->args, 0, cdr(todo));
-      val = car(todo);
+    else { // args left to do
+      f->index++;
+      int i = f->index;
+      val = car((cons*)f->args);
+      f->args = cdr((cons*)f->args);
+      f = stack_push(env);
+      f->type = FRAME_ARG;
+      f->index = i;
+      f->args = (obj)newenv;
       goto eval;
+    }
+  }
+
+  case FRAME_LETREC: {
+    vector* newenv = (vector*)val;
+    vector* args = (vector*)car((cons*)f->args);
+    if (f->index < vec_count(newenv)) {
+      int i = f->index;
+      f->index++; // next index
+      f = stack_push(newenv);
+      f->type = FRAME_ARG;
+      f->args = (obj)newenv;
+      f->index = i;
+      val = vec_get(args, i * 2 - 3);
+      env = newenv;
+      goto eval;
+    }
+    else { // no more assignments
+      f->type = FRAME_PROGN;
+      f->args = cdr((cons*)f->args); // body
+      f->index = 0;
+      env = newenv;
+      val = UNDEFINED;
+      goto apply_k;
     }
   }
 

@@ -29,6 +29,8 @@ assert "./lispy '(quote [1 a +])'" "[1 a +]" "quote vector"
 assert "./lispy '(do 1 2 3)'" "3" "do syntax"
 assert "./lispy '(if (< 1 2) 1 2)'" "1" "if consequent"
 assert "./lispy '(if (> 1 2) 1 2)'" "2" "if alternate"
+assert "./lispy '(letrec [a 1 b 2] (+ a b))'" "3" "non-rec letrec"
+assert "./lispy '(letrec [fac (lambda [n a] (if (= n 1) a (fac (- n 1) (* a n))))] (fac 10 1))'" "3628800" "factorial letrec"
 assert_end
 
 echo builtins
