@@ -150,7 +150,7 @@ static inline int lval_truthy(obj v) {
 // garbage collection
 
 #define STACK_SIZE 2048
-#define HEAP_SIZE 2048000
+#define HEAP_SIZE 2048
 
 obj** root_stack;
 int root_stack_ptr = 0;
@@ -186,9 +186,11 @@ void gc_pop_roots(int entries) {
   assert(root_stack_ptr >= 0);
 }
 
-#define KEEP(var) do {                                          \
-    debug(printf("Pushing " #var " onto root stack\n"));        \
-    gc_push_root((obj*)&(var));                                 \
+#define KEEP(var) do {                                                  \
+    debug(printf("Pushing " #var "@%ld onto root stack", (intptr_t)var)); \
+    debug(printf(" at #%d\n", root_stack_ptr));                         \
+    debug(print_obj((obj)(var))); debug(puts(""));                      \
+    gc_push_root((obj*)&(var));                                         \
   } while (0)
 #define FORGET(num) do {                        \
     debug(printf("Popping %d roots\n", num));   \
@@ -201,7 +203,8 @@ void print_obj(obj);
 #define fromspace_offset(ptr) ((long)ptr - (long)fromspace)
 
 obj gc_copy(obj o) {
-  debug(printf("GC copy object: ")); debug(print_obj(o)); debug(puts(""));
+  debug(printf("GC copy %s object: @%ld: ", lval_type_name(type(o)), o));
+  debug(print_obj(o)); debug(puts(""));
   if (o == UNDEFINED) return UNDEFINED;
   else if (lval_is_immediate(o)) return o;
   else if (type(o) == LVAL_FWD) {
@@ -235,8 +238,8 @@ void gc_dump_space() {
   printf("Dumping fromspace at %ld, extent %ld (size %ld)\n",
          (long)fromspace, (long)next, (long)next - (long)fromspace);
   while ((intptr_t)at < next) {
-    printf("Object at from:%ld type %d size %ld:\n", fromspace_offset(at),
-           (int)at->type, (long)at->size);
+    printf("Object at from:%ld type %s size %ld words:\n", fromspace_offset(at),
+           lval_type_name(at->type), (long)at->size);
     print_obj((obj)(at + 1)); putchar('\n');
     at += (1 + at->size);
   }
@@ -245,6 +248,7 @@ void gc_dump_space() {
 void gc() {
 #ifdef DEBUG
   long oldnext = next;
+  gc_dump_space();
 #endif
   gc_flip();
   debug(printf("Moving objects from space at %ld to space at %ld\n",
@@ -311,7 +315,8 @@ static inline obj alloc_obj(enum lval_type type, int size) {
   assert(type != LVAL_FWD);
   assert(size > 0);
   int bytes = sizeof(header) + round_to_word(size);
-  debug(printf("Allocating %d bytes with %ld bytes allocated\n", bytes, (next - (long)fromspace)));
+  debug(printf("Allocating %d bytes @%ld with %ld bytes allocated\n",
+               bytes, next, (next - (long)fromspace)));
   if (next + bytes > limit) {
     gc();
     return alloc_obj(type, size);
@@ -327,7 +332,7 @@ static inline obj alloc_obj(enum lval_type type, int size) {
 // === constructing values
 
 number make_num(long value) {
-  return (intptr_t)value << 1 | 1;
+  return ((intptr_t)value << 1) | 1;
 }
 
 symbol make_sym(char* characters) {
@@ -637,8 +642,8 @@ int stackptr;
 
 void gc_copy_frame_stack() {
   for (int i = 0; i <= stackptr; i++) {
-    frame* f = &stack[stackptr];
-    debug(printf("Examing frame #%d, it's a %s\n", i, frame_type(f->type)));
+    frame* f = &stack[i];
+    debug(printf("Examing %s frame #%d\n", frame_type(f->type), i));
     f->args = gc_copy((obj)f->args);
     f->env = (vector*)gc_copy((obj)f->env);
   }
@@ -707,7 +712,7 @@ int eval_special(cons* expr, obj* valreg, vector** envreg) {
       f->args = cdr(expr);
       f->type = FRAME_LETREC;
       f->index = 2;
-      return SYNTAX_APPLY;
+      result = SYNTAX_APPLY;
     }
     else if (strcmp(name, "if") == 0) {
       vector* ks = make_vec(2);
@@ -799,8 +804,7 @@ obj eval_loop(vector* toplevel, obj expr) {
   switch (f->type) {
 
   case FRAME_ARG: {
-    vector* args = (vector*)f->args;
-    vec_set(args, f->index, val);
+    vec_set((vector*)f->args, f->index, val);
     val = f->args;
     stack_pop(&env);
     goto apply_k;
@@ -1068,7 +1072,7 @@ int main(int argc, char** argv) {
   stack = malloc(sizeof(frame) * STACK_SIZE);
   stackptr = 0;
 
-  vector* toplevel;
+  vector* toplevel = (vector*)UNDEFINED;
   KEEP(toplevel);
   toplevel = init_toplevel();
 

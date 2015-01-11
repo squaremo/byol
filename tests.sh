@@ -43,3 +43,7 @@ echo functions
 assert "./lispy '((lambda [a b] [a b (+ a b)]) 4 5)'" "[4 5 9]" "apply function"
 assert "./lispy '((lambda [a] 1 (+ a 5) a) 4)'" "4" "lambda body"
 assert_end
+
+echo tailcall
+assert "./lispy '(letrec [count (lambda [n] (if (= n 0) 0 (count (- n 1))))] (count 20000))'" "0" "cannot run out of stack with tail calls"
+assert_end
