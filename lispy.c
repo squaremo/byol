@@ -53,6 +53,8 @@ char* lval_type_name(enum lval_type t) {
 #define TAG_IMM_SYM 12
 // 010
 #define TAG_PRIM 2
+// 110
+#define TAG_SPECIAL 6
 
 typedef intptr_t obj;
 
@@ -83,13 +85,31 @@ typedef struct {
   vector* formals;
   cons* body;
 } closure;
-typedef char nil;
+typedef obj nil;
+
+enum lval_special { // = n * 0x08 + TAG_SPECIAL
+  SPECIAL_NIL = 6,
+  SPECIAL_EMPTY_VEC = 14
+};
+
+static inline enum lval_type lval_special_type(enum lval_special s) {
+  switch (s) {
+  case SPECIAL_NIL: return LVAL_NIL;
+  case SPECIAL_EMPTY_VEC: return LVAL_VEC;
+  }
+}
+
+#define lval_is_special(val, special) ((val) == (special))
 
 static inline enum lval_type obj_type(obj val) {
   // integer: the lowest bit is 1
   if (((intptr_t)val & 1) == 1) return LVAL_NUM;
-  // pointer to primitive struct: last three bits are 010
+  // pointer to primitive function
   if (((intptr_t)val & 7) == TAG_PRIM) return LVAL_PRIM;
+  // "special" value
+  if (((intptr_t)val & 7) == TAG_SPECIAL) {
+    return lval_special_type(val);
+  }
   // inline symbol: the last byte is 0000 1100
   if (((intptr_t)val & 255) == TAG_IMM_SYM) return LVAL_IMM_SYM;
   // Otherwise look at the header
@@ -104,7 +124,7 @@ static inline int lval_is_immediate(obj o) {
 }
 
 static inline int lval_is_sym(obj o) {
-  return type(o) == LVAL_IMM_SYM || type(o) == LVAL_IMM_SYM;
+  return type(o) == LVAL_SYM || type(o) == LVAL_IMM_SYM;
 }
 
 static inline obj fwd_target(obj o) {
@@ -128,6 +148,7 @@ static inline int sym_cmp(symbol a, symbol b) {
 }
 
 static inline int vec_count(vector* vec) {
+  if (lval_is_special((obj)vec, SPECIAL_EMPTY_VEC)) return 0; 
   return vec->count;
 }
 
@@ -331,6 +352,10 @@ static inline obj alloc_obj(enum lval_type type, int size) {
 
 // === constructing values
 
+obj make_special(enum lval_special special) {
+  return special;;
+}
+
 number make_num(long value) {
   return ((intptr_t)value << 1) | 1;
 }
@@ -362,6 +387,7 @@ err* make_err(char* msg) {
 }
 
 vector* make_vec(int count) {
+  if (count == 0) return (vector*)make_special(SPECIAL_EMPTY_VEC);
   int size = sizeof(vector) + sizeof(obj) * count;
   vector* result = (vector*)alloc_obj(LVAL_VEC, size);
   memset((void*)result, 0, size);
@@ -378,10 +404,8 @@ cons* make_cons(obj car, obj cdr) {
   return result;
 }
 
-nil* make_nil() {
-  nil* result = (nil*)alloc_obj(LVAL_NIL, 4);
-  strcpy(result, "nil");
-  return result;
+nil make_nil() {
+  return (nil)make_special(SPECIAL_NIL);
 }
 
 prim make_prim(struct prim_s* p) {
