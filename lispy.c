@@ -127,11 +127,32 @@ static inline int lval_is_sym(obj o) {
   return type(o) == LVAL_SYM || type(o) == LVAL_IMM_SYM;
 }
 
+static inline int lval_is_list(obj o) {
+  return type(o) == LVAL_CONS || type(o) == LVAL_NIL;
+}
+
+static inline int lval_is_num(obj o) {
+  return type(o) == LVAL_NUM;
+}
+
+static inline int lval_is_vec(obj o) {
+  return type(o) == LVAL_VEC;
+}
+
+static inline int lval_is_closure(obj o) {
+  return type(o) == LVAL_FUNC;
+}
+
+static inline int lval_is_prim(obj o) {
+  return type(o) == LVAL_PRIM;
+}
+
 static inline obj fwd_target(obj o) {
   return *((obj*)o - 1);
 }
 
 static inline number num_value(obj o) {
+  assert(lval_is_num(o));
   return (number)o >> 1;
 }
 
@@ -148,7 +169,7 @@ static inline int sym_cmp(symbol a, symbol b) {
 }
 
 static inline int vec_count(vector* vec) {
-  if (lval_is_special((obj)vec, SPECIAL_EMPTY_VEC)) return 0; 
+  if (lval_is_special((obj)vec, SPECIAL_EMPTY_VEC)) return 0;
   return vec->count;
 }
 
@@ -353,7 +374,7 @@ static inline obj alloc_obj(enum lval_type type, int size) {
 // === constructing values
 
 obj make_special(enum lval_special special) {
-  return special;;
+  return special;
 }
 
 number make_num(long value) {
@@ -493,7 +514,7 @@ obj env_lookup(vector* env, symbol name) {
     }
     env = (vector*)vec_get(env, 0);
   }
-  return UNDEFINED;
+  assert(0);
 }
 
 // ======= reading and printing
@@ -629,67 +650,46 @@ void print_env(vector* env) {
 
 // === eeeeeeval
 
-enum frame_type { FRAME_EMPTY, FRAME_ARG,
+enum frame_type { FRAME_EMPTY,
                   FRAME_APPLY, FRAME_IF,
                   FRAME_PROGN, FRAME_VEC,
                   FRAME_LETREC };
 
-typedef struct frame {
-  enum frame_type type;
-  vector* env;
-  obj args;
-  int index;
-} frame;
-
-static inline char* frame_type(enum frame_type t) {
+char* frame_type_name(enum frame_type t) {
   switch (t) {
-  case FRAME_EMPTY: return "empty";
-  case FRAME_APPLY: return "funcall";
-  case FRAME_IF: return "if";
-  case FRAME_PROGN: return "do";
+  case FRAME_EMPTY: return "exit";
+  case FRAME_APPLY: return "application";
+  case FRAME_IF: return "conditional";
+  case FRAME_PROGN: return "block";
   case FRAME_VEC: return "vector";
-  case FRAME_ARG: return "arg";
   case FRAME_LETREC: return "letrec";
   }
 }
 
-void print_frame(frame* f) {
-  printf("--frame (%s)--\n", frame_type(f->type));
-  puts("---args---");
-  print_obj(f->args); putchar('\n');
-  print_env(f->env);
-  puts("-----");
-}
-
-frame* stack;
+obj* stack;
 int stackptr;
 
 void gc_copy_frame_stack() {
   for (int i = 0; i <= stackptr; i++) {
-    frame* f = &stack[i];
-    debug(printf("Examing %s frame #%d\n", frame_type(f->type), i));
-    f->args = gc_copy((obj)f->args);
-    f->env = (vector*)gc_copy((obj)f->env);
+    stack[i] = gc_copy(stack[i]);
   }
 }
 
-static inline frame* stack_push(vector* env) {
-  debug(puts("push frame"));
-  frame* f = &stack[++stackptr];
-  f->env = env;
-  return f;
+#define stack_push(o0) {                                                \
+    obj o = (obj)(o0);                                                  \
+    debug(printf("push ")); debug(print_obj(o)); debug(puts(""));       \
+    stack[++stackptr] = o;                                              \
+  }
+
+static inline obj stack_peek() {
+  return stack[stackptr];
 }
 
-static inline frame* stack_peek() {
-  return &stack[stackptr];
-}
-
-static inline void stack_pop(vector** env) {
-  debug(puts("pop frame"));
-  frame* f = stack_peek();
-  debug(printf("restoring env: ")); debug(print_env(f->env)); debug(putchar('\n'));
-  *env = f->env;
+static inline obj stack_pop() {
+  obj o = stack[stackptr];
+  debug(printf("pop ")); debug(print_obj(o)); debug(puts(""));
   stackptr--;
+  return o;
 }
 
 #define SYNTAX_APPLY 2
@@ -717,45 +717,48 @@ int eval_special(cons* expr, obj* valreg, vector** envreg) {
     }
     else if (strcmp(name, "letrec") == 0) {
       vector* args = (vector*)cadr(expr);
-      assert(type(args) == LVAL_VEC);
+      assert(lval_is_vec((obj)args));
       int c = vec_count(args);
       assert(c % 2 == 0);
       c /= 2;
       KEEP(args);
-      *valreg = (obj)make_vec(c + 2);
-      vec_set((vector*)*valreg, 0, (obj)*envreg);
+      vector* letenv = make_vec(c + 2);
+      KEEP(letenv);
       vector* names = make_vec(c);
-      FORGET(1);
-      vec_set((vector*)*valreg, 1, (obj)names);
+      // that's all the allocation
+      FORGET(2);
+      vec_set(letenv, 0, (obj)*envreg); // set parent env
+      vec_set(letenv, 1, (obj)names);
       for (int i = 0; i < c; i++) {
         obj s = vec_get(args, i * 2);
         assert(lval_is_sym(s));
         vec_set(names, i, s);
       }
-      frame* f = stack_push(*envreg);
-      f->args = cdr(expr);
-      f->type = FRAME_LETREC;
-      f->index = 2;
-      result = SYNTAX_APPLY;
+      *envreg = letenv;
+
+      stack_push(cddr(expr)); // body
+      stack_push(make_num(FRAME_PROGN));
+
+      stack_push(args);
+      stack_push(make_num(1)); // next expr index
+      stack_push(make_num(FRAME_LETREC));
+      *valreg = vec_get(args, 1);
+      result = SYNTAX_EVAL;
     }
     else if (strcmp(name, "if") == 0) {
-      vector* ks = make_vec(2);
-      vec_set(ks, 0, car((cons*)cddr(expr)));
-      vec_set(ks, 1, cadr((cons*)cddr(expr)));
       *valreg = cadr(expr);
-      frame* f = stack_push(*envreg);
-      f->type = FRAME_IF;
-      f->args = (obj)ks;
+      stack_push(cddr(expr));
+      stack_push(make_num(FRAME_IF));
+      result = SYNTAX_EVAL;
     }
     else if (strcmp(name, "do") == 0) {
       int len = cons_len(expr) - 1;
       *valreg = cadr(expr);
       if (len > 1) {
-        frame* f = stack_push(*envreg);
-        f->type = FRAME_PROGN;
-        f->args = cddr(expr);
-        f->index = 0;
+        stack_push(cddr(expr));
+        stack_push(make_num(FRAME_PROGN));
       }
+      result = SYNTAX_EVAL;
     }
     else result = SYNTAX_NONE;
   }
@@ -766,8 +769,7 @@ int eval_special(cons* expr, obj* valreg, vector** envreg) {
 
 obj eval_loop(vector* toplevel, obj expr) {
 
-  frame* f = stack_peek();
-  f->type = FRAME_EMPTY;
+  stack_push(make_num(FRAME_EMPTY));
 
   obj val = expr;
   vector* env = toplevel;
@@ -786,15 +788,10 @@ obj eval_loop(vector* toplevel, obj expr) {
       case SYNTAX_NONE:
         {
           int len = cons_len((cons*)val);
-          f = stack_push(env);
-          f->type = FRAME_APPLY;
-          f->args = cdr((cons*)val);
-          f->index = 1;
-          // and at least evaluate the head
-          f = stack_push(env);
-          f->type = FRAME_ARG;
-          f->args = (obj)make_vec(len + 1);
-          f->index = 1;
+          stack_push(cdr((cons*)val));
+          stack_push(make_vec(len + 1));
+          stack_push(make_num(1));
+          stack_push(make_num(FRAME_APPLY));
           val = car((cons*)val);
         }
       }
@@ -803,11 +800,11 @@ obj eval_loop(vector* toplevel, obj expr) {
   case LVAL_VEC:
     {
       if (vec_count((vector*)val) == 0) goto apply_k;
-      f = stack_push(env);
-      f->type = FRAME_VEC;
-      f->args = val;
-      f->index = 0;
-      val = vec_get((vector*)f->args, 0);
+      stack_push(val);
+      stack_push(make_num(0));
+      stack_push(make_num(FRAME_VEC));
+      val = vec_get((vector*)val, 0);
+      goto eval;
     }
     goto eval;
   case LVAL_IMM_SYM: // fall through
@@ -817,126 +814,133 @@ obj eval_loop(vector* toplevel, obj expr) {
   default:
     goto apply_k;
   }
-  
+
  apply_k:
   assert(stackptr >= 0);
-  f = stack_peek();
+  enum frame_type t = (enum frame_type)num_value(stack_pop());
 
-  debug(printf("apply: ")); debug(print_obj(val)); debug(putchar('\n'));
-  debug(printf("with frame: ")); debug(print_frame(f));
+  debug(printf("apply %s to ", frame_type_name(t)));
+  debug(print_obj(val)); debug(putchar('\n'));
 
-  switch (f->type) {
-
-  case FRAME_ARG: {
-    vec_set((vector*)f->args, f->index, val);
-    val = f->args;
-    stack_pop(&env);
-    goto apply_k;
-  }
+  switch (t) {
 
   case FRAME_APPLY: {
-    vector* newenv = (vector*)val;
-    cons* exprs = (cons*)f->args;
-    
-    if (type(exprs) == LVAL_NIL) {
-      obj head = vec_get(newenv, 1);
-      if (type(head) == LVAL_FUNC) {
+    // we're stashing argument values in a proto-env on the stack. NB
+    // the index refers to the next *env* slot to put the value in; it
+    // starts at 1 since we evaluate the head first and stash it there
+    // (where we'll put the names later).
+    long index = num_value(stack_pop());
+    vector* args = (vector*)stack_pop();
+    assert(lval_is_vec((obj)args));
+
+    vec_set(args, index, val);
+    index++;
+
+    obj exprs = stack_pop();
+    assert(lval_is_list(exprs));
+    if (type(exprs) == LVAL_CONS) {
+      val = car((cons*)exprs);
+      stack_push(cdr((cons*)exprs));
+      stack_push(args);
+      stack_push(make_num(index));
+      stack_push(make_num(FRAME_APPLY));
+      goto eval;
+    }
+    else {
+      obj head = vec_get(args, 1);
+      if (lval_is_closure(head)) {
         closure* func = (closure*)head;
-        vec_set(newenv, 0, (obj)func->env);
-        vec_set(newenv, 1, (obj)func->formals);
-        if (type(cdr(func->body)) == LVAL_CONS) {
-          val = car(func->body);
-          // NB reuse stack frame
-          f->type = FRAME_PROGN;
-          f->args = cdr(func->body);
-          f->index = 0;
-          f->env = env;
-        }
-        else {
-          stack_pop(&env);
-          val = car(func->body);
-        }
-        // either way we want the new env to eval what's in val
-        env = newenv;
-        goto eval;
-      }
-      else if (type(head) == LVAL_PRIM) {
-        prim_fun func = prim_value(head)->func;
-        // don't care about formals or parent env
-        stack_pop(&env);
-        val = func(newenv);
+        vec_set(args, 0, (obj)func->env);
+        vec_set(args, 1, (obj)func->formals);
+        env = args;
+        val = UNDEFINED;
+        stack_push(func->body);
+        stack_push(make_num(FRAME_PROGN));
         goto apply_k;
       }
-    }
-    else { // args left to do
-      f->index++;
-      int i = f->index;
-      val = car((cons*)f->args);
-      f->args = cdr((cons*)f->args);
-      f = stack_push(env);
-      f->type = FRAME_ARG;
-      f->index = i;
-      f->args = (obj)newenv;
-      goto eval;
+      else if (lval_is_prim(head)) {
+        prim_fun func = prim_value(head)->func;
+        val = func(args);
+        goto apply_k;
+      }
+      else {
+        val = (obj)make_err("Attempted to apply non-procedure");
+        goto apply_k;
+      }
     }
   }
 
   case FRAME_LETREC: {
-    vector* newenv = (vector*)val;
-    vector* args = (vector*)car((cons*)f->args);
-    if (f->index < vec_count(newenv)) {
-      int i = f->index;
-      f->index++; // next index
-      f = stack_push(newenv);
-      f->type = FRAME_ARG;
-      f->args = (obj)newenv;
-      f->index = i;
-      val = vec_get(args, i * 2 - 3);
-      env = newenv;
+    long index = num_value(stack_pop());
+    // put our calculated value in the environment. `args` is a vector
+    // of `[name0 expr0 name1 expr1 ...]` and the enstacked index
+    // points at the slot val was calculated from; the env has two
+    // slots at the start (for parent and names) reserved; so we need
+    // to put the value in (index - 1) / 2 + 2, or as below.
+    vec_set(env, (index + 3) / 2, val);
+    index += 2;
+
+    vector* args = (vector*)stack_pop();
+    assert(type(args) == LVAL_VEC);
+
+    if (index < vec_count(args)) {
+      // more args to go; no off-by-one because we go two at a time
+      stack_push(args);
+      stack_push(make_num(index));
+      stack_push(make_num(FRAME_LETREC));
+      val = vec_get(args, index);
       goto eval;
     }
-    else { // no more assignments
-      f->type = FRAME_PROGN;
-      f->args = cdr((cons*)f->args); // body
-      f->index = 0;
-      env = newenv;
-      val = UNDEFINED;
+    else {
+      // no more args! evaluate the body
       goto apply_k;
     }
   }
 
-  case FRAME_VEC:
-    vec_set((vector*)f->args, f->index++, val);
-    if (f->index < vec_count((vector*)f->args)) {
-      val = vec_get((vector*)f->args, f->index);
+  case FRAME_VEC: {
+    long index = num_value(stack_pop());
+    vector* args = (vector*)stack_pop();
+    assert(lval_is_vec((obj)args));
+    vec_set(args, index, val);
+    index++;
+
+    if (index < vec_count(args)) {
+      val = vec_get(args, index);
+      stack_push(args);
+      stack_push(make_num(index));
+      stack_push(make_num(FRAME_VEC));
       goto eval;
     }
     else {
-      stack_pop(&env);
-      val = f->args;
+      val = (obj)args;
       goto apply_k;
     }
+  }
 
-  case FRAME_IF:
+  case FRAME_IF: {
+    cons* ks = (cons*)stack_pop();
+    assert(type(ks) == LVAL_CONS);
     if (lval_truthy(val)) {
-      val = vec_get((vector*)f->args, 0);
+      val = car(ks);
     }
     else {
-      val = vec_get((vector*)f->args, 1);
+      val = cadr(ks);
     }
-    stack_pop(&env);
     goto eval;
+  }
 
-  case FRAME_PROGN:
-    if (type(f->args) == LVAL_NIL) {
-      stack_pop(&env);
+  case FRAME_PROGN: {
+    obj exprs = stack_pop();
+    if (type(exprs) == LVAL_NIL) {
       goto apply_k;
     }
     else {
-      val = car((cons*)f->args);
-      f->args = cdr((cons*)f->args);
+      val = car((cons*)exprs);
+      stack_push(cdr((cons*)exprs));
+      stack_push(make_num(FRAME_PROGN));
+      goto eval;
     }
-    goto eval;
+  }
 
   case FRAME_EMPTY:
     FORGET(2);
@@ -1009,10 +1013,21 @@ obj prim_list(vector* argv) {
   return res;
 }
 
+obj prim_vector(vector* argv) {
+  KEEP(argv);
+  int len = vec_count(argv);
+  vector* res = make_vec(len);
+  FORGET(1);
+  for (int i = 0; i < len; i++) {
+    vec_set(res, i, vec_get(argv, i+2));
+  }
+  return (obj)res;
+}
+
 #define PRIM(name, func) (struct prim_s){name, &func};
 
 vector* init_toplevel() {
-  int c = 10;
+  int c = 11;
 
   struct prim_s* prims = malloc(c * sizeof(struct prim_s));
   prims[0] = PRIM("+", prim_plus);
@@ -1025,6 +1040,7 @@ vector* init_toplevel() {
   prims[7] = PRIM(">=", prim_gte);
   prims[8] = PRIM("=", prim_numeq);
   prims[9] = PRIM("list", prim_list);
+  prims[10] = PRIM("vector", prim_vector);
 
   // assume we won't do a collection here
   vector* names = make_vec(c);
@@ -1035,7 +1051,6 @@ vector* init_toplevel() {
     vec_set(names, i, (obj)make_sym(prims[i].name));
     vec_set(env, i + 2, (obj)make_prim(&prims[i]));
   }
-  
   return env;
 }
 
@@ -1081,7 +1096,7 @@ int main(int argc, char** argv) {
   mpc_parser_t* Sexp = mpc_new("sexp");
   mpc_parser_t* Vector = mpc_new("vector");
   mpc_parser_t* Program = mpc_new("program");
-  
+
   mpca_lang(MPCA_LANG_DEFAULT, "                                   \
     number   : /-?[0-9]+/ ;                                        \
     symbol   : /[-<>=+*\\/a-zA-Z_0-9!?]+/ ;                        \
@@ -1093,7 +1108,7 @@ int main(int argc, char** argv) {
   ", Number, Symbol, String, Expr, Sexp, Vector, Program);
 
   gc_init();
-  stack = malloc(sizeof(frame) * STACK_SIZE);
+  stack = malloc(sizeof(obj) * STACK_SIZE);
   stackptr = 0;
 
   vector* toplevel = (vector*)UNDEFINED;

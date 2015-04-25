@@ -47,3 +47,8 @@ assert_end
 echo tailcall
 assert "./lispy '(letrec [count (lambda [n] (if (= n 0) 0 (count (- n 1))))] (count 20000))'" "0" "cannot run out of stack with tail calls"
 assert_end
+
+echo env
+assert_raises "./lispy '(do (letrec [a 1 b 2] (+ a b)) a)'" '134'
+assert "./lispy '(letrec [f (lambda [a] (+ a 1))] (letrec [b 4] (f 1) b))'" '4'
+assert_end
