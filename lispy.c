@@ -650,7 +650,7 @@ void print_env(vector* env) {
 
 // === eeeeeeval
 
-enum frame_type { FRAME_EMPTY,
+enum frame_type { FRAME_EMPTY, FRAME_RETURN,
                   FRAME_APPLY, FRAME_IF,
                   FRAME_PROGN, FRAME_VEC,
                   FRAME_LETREC };
@@ -658,6 +658,7 @@ enum frame_type { FRAME_EMPTY,
 char* frame_type_name(enum frame_type t) {
   switch (t) {
   case FRAME_EMPTY: return "exit";
+  case FRAME_RETURN: return "return";
   case FRAME_APPLY: return "application";
   case FRAME_IF: return "conditional";
   case FRAME_PROGN: return "block";
@@ -681,6 +682,11 @@ void gc_copy_frame_stack() {
     stack[++stackptr] = o;                                              \
   }
 
+#define stack_push_frame(t) {                                   \
+    debug(printf("push frame ")); debug(puts(frame_type_name(t)));      \
+  stack[++stackptr] = make_num(t);                              \
+  }
+
 static inline obj stack_peek() {
   return stack[stackptr];
 }
@@ -696,7 +702,7 @@ static inline obj stack_pop() {
 #define SYNTAX_EVAL  1
 #define SYNTAX_NONE  0
 
-int eval_special(cons* expr, obj* valreg, vector** envreg) {
+int eval_special(cons* expr, obj* valreg, vector** envreg, int tailcall) {
   KEEP(expr);
   int result = SYNTAX_EVAL;
   obj head = car(expr);
@@ -734,31 +740,33 @@ int eval_special(cons* expr, obj* valreg, vector** envreg) {
         assert(lval_is_sym(s));
         vec_set(names, i, s);
       }
+
+      if (!tailcall) {
+        debug(puts("Non-tailcall; pushing return frame"));
+        stack_push(*envreg);
+        stack_push_frame(FRAME_RETURN);
+      }
       *envreg = letenv;
 
       stack_push(cddr(expr)); // body
-      stack_push(make_num(FRAME_PROGN));
+      stack_push_frame(FRAME_PROGN);
 
       stack_push(args);
       stack_push(make_num(1)); // next expr index
-      stack_push(make_num(FRAME_LETREC));
+      stack_push_frame(FRAME_LETREC);
       *valreg = vec_get(args, 1);
       result = SYNTAX_EVAL;
     }
     else if (strcmp(name, "if") == 0) {
       *valreg = cadr(expr);
       stack_push(cddr(expr));
-      stack_push(make_num(FRAME_IF));
+      stack_push_frame(FRAME_IF);
       result = SYNTAX_EVAL;
     }
     else if (strcmp(name, "do") == 0) {
-      int len = cons_len(expr) - 1;
-      *valreg = cadr(expr);
-      if (len > 1) {
-        stack_push(cddr(expr));
-        stack_push(make_num(FRAME_PROGN));
-      }
-      result = SYNTAX_EVAL;
+      stack_push(cdr(expr));
+      stack_push_frame(FRAME_PROGN);
+      result = SYNTAX_APPLY;
     }
     else result = SYNTAX_NONE;
   }
@@ -769,10 +777,12 @@ int eval_special(cons* expr, obj* valreg, vector** envreg) {
 
 obj eval_loop(vector* toplevel, obj expr) {
 
-  stack_push(make_num(FRAME_EMPTY));
+  stack_push_frame(FRAME_EMPTY);
 
   obj val = expr;
   vector* env = toplevel;
+  int tailcall = 1;
+
   KEEP(val); KEEP(env);
 
  eval:
@@ -782,16 +792,21 @@ obj eval_loop(vector* toplevel, obj expr) {
   switch (type(val)) {
   case LVAL_CONS:
     {
-      switch (eval_special((cons*)val, &val, &env)) {
+      switch (eval_special((cons*)val, &val, &env, tailcall)) {
       case SYNTAX_APPLY:
         goto apply_k;
       case SYNTAX_NONE:
         {
+          if (!tailcall) {
+            debug(puts("Non-tailcall; pushing return frame"));
+            stack_push(env);
+            stack_push_frame(FRAME_RETURN);
+          }
           int len = cons_len((cons*)val);
           stack_push(cdr((cons*)val));
           stack_push(make_vec(len + 1));
           stack_push(make_num(1));
-          stack_push(make_num(FRAME_APPLY));
+          stack_push_frame(FRAME_APPLY);
           val = car((cons*)val);
         }
       }
@@ -802,7 +817,7 @@ obj eval_loop(vector* toplevel, obj expr) {
       if (vec_count((vector*)val) == 0) goto apply_k;
       stack_push(val);
       stack_push(make_num(0));
-      stack_push(make_num(FRAME_VEC));
+      stack_push_frame(FRAME_VEC);
       val = vec_get((vector*)val, 0);
       goto eval;
     }
@@ -824,6 +839,13 @@ obj eval_loop(vector* toplevel, obj expr) {
 
   switch (t) {
 
+  case FRAME_RETURN: {
+    debug(puts("restoring environment"));
+    env = (vector*)stack_pop();
+    assert(lval_is_vec((obj)env));
+    goto apply_k;
+  }
+
   case FRAME_APPLY: {
     // we're stashing argument values in a proto-env on the stack. NB
     // the index refers to the next *env* slot to put the value in; it
@@ -843,7 +865,8 @@ obj eval_loop(vector* toplevel, obj expr) {
       stack_push(cdr((cons*)exprs));
       stack_push(args);
       stack_push(make_num(index));
-      stack_push(make_num(FRAME_APPLY));
+      stack_push_frame(FRAME_APPLY);
+      tailcall = 0;
       goto eval;
     }
     else {
@@ -855,7 +878,7 @@ obj eval_loop(vector* toplevel, obj expr) {
         env = args;
         val = UNDEFINED;
         stack_push(func->body);
-        stack_push(make_num(FRAME_PROGN));
+        stack_push_frame(FRAME_PROGN);
         goto apply_k;
       }
       else if (lval_is_prim(head)) {
@@ -887,7 +910,7 @@ obj eval_loop(vector* toplevel, obj expr) {
       // more args to go; no off-by-one because we go two at a time
       stack_push(args);
       stack_push(make_num(index));
-      stack_push(make_num(FRAME_LETREC));
+      stack_push_frame(FRAME_LETREC);
       val = vec_get(args, index);
       goto eval;
     }
@@ -908,7 +931,7 @@ obj eval_loop(vector* toplevel, obj expr) {
       val = vec_get(args, index);
       stack_push(args);
       stack_push(make_num(index));
-      stack_push(make_num(FRAME_VEC));
+      stack_push_frame(FRAME_VEC);
       goto eval;
     }
     else {
@@ -920,6 +943,8 @@ obj eval_loop(vector* toplevel, obj expr) {
   case FRAME_IF: {
     cons* ks = (cons*)stack_pop();
     assert(type(ks) == LVAL_CONS);
+    debug(puts("if k: engaging tailcall"));
+    tailcall = 1;
     if (lval_truthy(val)) {
       val = car(ks);
     }
@@ -931,13 +956,18 @@ obj eval_loop(vector* toplevel, obj expr) {
 
   case FRAME_PROGN: {
     obj exprs = stack_pop();
-    if (type(exprs) == LVAL_NIL) {
-      goto apply_k;
+    if (type(cdr((cons*)exprs)) == LVAL_NIL) {
+      debug(puts("last expr: engaging tailcall"));
+      tailcall = 1;
+      val = (obj)car((cons*)exprs);
+      goto eval;
     }
     else {
+      debug(puts("not last expr: disengaging tailcall"));
+      tailcall = 0;
       val = car((cons*)exprs);
       stack_push(cdr((cons*)exprs));
-      stack_push(make_num(FRAME_PROGN));
+      stack_push_frame(FRAME_PROGN);
       goto eval;
     }
   }

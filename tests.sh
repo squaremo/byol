@@ -51,4 +51,5 @@ assert_end
 echo env
 assert_raises "./lispy '(do (letrec [a 1 b 2] (+ a b)) a)'" '134'
 assert "./lispy '(letrec [f (lambda [a] (+ a 1))] (letrec [b 4] (f 1) b))'" '4'
+assert "./lispy '(letrec [a 1] (+ (letrec [a 2] a) a))'" '3'
 assert_end
