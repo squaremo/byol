@@ -53,3 +53,9 @@ assert_raises "./lispy '(do (letrec [a 1 b 2] (+ a b)) a)'" '134'
 assert "./lispy '(letrec [f (lambda [a] (+ a 1))] (letrec [b 4] (f 1) b))'" '4'
 assert "./lispy '(letrec [a 1] (+ (letrec [a 2] a) a))'" '3'
 assert_end
+
+echo define
+assert "./lispy '(do (define four 4) (define three 3) (* three four))'" "12" "define vals"
+assert "./lispy '(do (define add1 (lambda [a] (+ a 1))) (add1 6))'" "7" "define lambda"
+assert "./lispy '(do (define six 6) (define seven (+ six 1)) (+ seven six))'" "13" "consecutive defines"
+assert_end

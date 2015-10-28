@@ -87,6 +87,8 @@ typedef struct {
 } closure;
 typedef obj nil;
 
+void print_obj(obj);
+
 enum lval_special { // = n * 0x08 + TAG_SPECIAL
   SPECIAL_NIL = 6,
   SPECIAL_EMPTY_VEC = 14
@@ -181,6 +183,14 @@ static inline obj vec_get(vector* vec, int i) {
   return ((obj*)(vec + 1))[i];
 }
 
+static inline void vec_copy(vector* from, vector* to) {
+  assert(vec_count(from) <= vec_count(to));
+  int count = vec_count(from);
+  for (int i=0; i < count; i++) {
+    vec_set(to, i, vec_get(from, i));
+  }
+}
+
 static inline int round_to_word(int n) {
   return (n + (sizeof(intptr_t) - 1)) & ~(sizeof(intptr_t) - 1);
 }
@@ -238,8 +248,6 @@ void gc_pop_roots(int entries) {
     debug(printf("Popping %d roots\n", num));   \
     gc_pop_roots(num);                          \
   } while (0)
-
-void print_obj(obj);
 
 #define tospace_offset(ptr) ((long)ptr - (long)tospace)
 #define fromspace_offset(ptr) ((long)ptr - (long)fromspace)
@@ -653,7 +661,7 @@ void print_env(vector* env) {
 enum frame_type { FRAME_EMPTY, FRAME_RETURN,
                   FRAME_APPLY, FRAME_IF,
                   FRAME_PROGN, FRAME_VEC,
-                  FRAME_LETREC };
+                  FRAME_LETREC, FRAME_SET };
 
 char* frame_type_name(enum frame_type t) {
   switch (t) {
@@ -664,6 +672,7 @@ char* frame_type_name(enum frame_type t) {
   case FRAME_PROGN: return "block";
   case FRAME_VEC: return "vector";
   case FRAME_LETREC: return "letrec";
+  case FRAME_SET: return "set";
   }
 }
 
@@ -711,6 +720,40 @@ int eval_special(cons* expr, obj* valreg, vector** envreg, int tailcall) {
     if (strcmp(name, "quote") == 0) {
       *valreg = cadr(expr);
       result = SYNTAX_APPLY;
+    }
+    else if (strcmp(name, "define") == 0) {
+      // assume we are in the top-level (for now)
+      obj name = cadr(expr);
+      assert(lval_is_sym(name));
+      debug(printf("Defining %s\n", sym_name(name)));
+      vector* names = (vector*)vec_get(*envreg, 1);
+      int count = vec_count(names);
+      int slot = 0;
+      for (int i = 0; i < count; i++) {
+        if (sym_cmp((symbol)vec_get(names, i), name) == 0) {
+          slot = i;
+          goto found_slot;
+        }
+      }
+      // not a variable yet, so create one
+      debug(printf("Creating variable %s\n", sym_name(name)));
+      slot = count;
+      vector* new_names = make_vec(count + 1);
+      KEEP(new_names);
+      vector* new_globals = make_vec(count + 3);
+      FORGET(1); // allocation done
+      vec_copy(names, new_names);
+      vec_set(new_names, slot, (obj)name);
+      vec_copy(*envreg, new_globals);
+      vec_set(new_globals, 1, (obj)new_names);
+      debug(printf("New env: "); print_env(new_globals); puts(""));
+      *envreg = new_globals;
+    found_slot:
+      // thing to evaluate and put in the slot
+      *valreg = cadr((cons*)cdr((expr)));
+      stack_push(*envreg);
+      stack_push(make_num(slot + 2));
+      stack_push_frame(FRAME_SET);
     }
     else if (strcmp(name, "lambda") == 0) {
       vector* args = (vector*)cadr(expr);
@@ -775,12 +818,12 @@ int eval_special(cons* expr, obj* valreg, vector** envreg, int tailcall) {
   return result;
 }
 
-obj eval_loop(vector* toplevel, obj expr) {
+obj eval_loop(vector* top, obj expr) {
 
   stack_push_frame(FRAME_EMPTY);
 
   obj val = expr;
-  vector* env = toplevel;
+  vector* env = top;
   int tailcall = 1;
 
   KEEP(val); KEEP(env);
@@ -843,6 +886,16 @@ obj eval_loop(vector* toplevel, obj expr) {
     debug(puts("restoring environment"));
     env = (vector*)stack_pop();
     assert(lval_is_vec((obj)env));
+    goto apply_k;
+  }
+
+  case FRAME_SET: {
+    long slot = num_value(stack_pop());
+    vector* here = (vector*)stack_pop();
+    assert(lval_is_vec((obj)here));
+
+    vec_set(here, slot, val);
+    val = UNDEFINED;
     goto apply_k;
   }
 
@@ -1081,7 +1134,13 @@ vector* init_toplevel() {
     vec_set(names, i, (obj)make_sym(prims[i].name));
     vec_set(env, i + 2, (obj)make_prim(&prims[i]));
   }
-  return env;
+
+  vector* globals = (vector*)UNDEFINED;
+  globals = make_vec(2);
+  vec_set(globals, 1, (obj)make_vec(0));
+  vec_set(globals, 0, (obj)env);
+
+  return globals;
 }
 
 void eval_root(vector* toplevel, mpc_ast_t* root) {
